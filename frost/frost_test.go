@@ -549,3 +549,162 @@ func TestBlake2bHasher(t *testing.T) {
 		t.Error("blake2b signature should not verify with sha256 hasher")
 	}
 }
+
+func TestPoseidonHasher(t *testing.T) {
+	g := &bjj.BJJ{}
+	threshold := 2
+	total := 3
+
+	// Use PoseidonHasher (zkSNARK optimized)
+	f, err := NewWithHasher(g, threshold, total, NewPoseidonHasher())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run DKG
+	participants := make([]*Participant, total)
+	for i := 0; i < total; i++ {
+		p, err := f.NewParticipant(rand.Reader, i+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		participants[i] = p
+	}
+
+	broadcasts := make([]*Round1Data, total)
+	for i, p := range participants {
+		broadcasts[i] = p.Round1Broadcast()
+	}
+
+	for i, sender := range participants {
+		for j := 0; j < total; j++ {
+			if i == j {
+				continue
+			}
+			privateData := f.Round1PrivateSend(sender, j+1)
+			if err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	keyShares := make([]*KeyShare, total)
+	for i, p := range participants {
+		ks, err := f.Finalize(p, broadcasts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyShares[i] = ks
+	}
+
+	// Sign with Poseidon hasher
+	message := []byte("test message with poseidon")
+	signers := keyShares[:threshold]
+
+	nonces := make([]*SigningNonce, threshold)
+	commitments := make([]*SigningCommitment, threshold)
+	for i, ks := range signers {
+		n, c, err := f.SignRound1(rand.Reader, ks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonces[i] = n
+		commitments[i] = c
+	}
+
+	sigShares := make([]*SignatureShare, threshold)
+	for i, ks := range signers {
+		ss, err := f.SignRound2(ks, nonces[i], message, commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sigShares[i] = ss
+	}
+
+	sig, err := f.Aggregate(message, commitments, sigShares)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify signature
+	if !f.Verify(message, sig, keyShares[0].GroupKey) {
+		t.Error("signature verification failed with Poseidon hasher")
+	}
+
+	// Verify wrong message fails
+	if f.Verify([]byte("wrong message"), sig, keyShares[0].GroupKey) {
+		t.Error("signature should not verify with wrong message")
+	}
+
+	// Verify that signature from Poseidon hasher doesn't verify with SHA256 hasher
+	f2, _ := New(g, threshold, total)
+	if f2.Verify(message, sig, keyShares[0].GroupKey) {
+		t.Error("poseidon signature should not verify with sha256 hasher")
+	}
+
+	// Verify that signature from Poseidon hasher doesn't verify with Blake2b hasher
+	f3, _ := NewWithHasher(g, threshold, total, NewBlake2bHasher())
+	if f3.Verify(message, sig, keyShares[0].GroupKey) {
+		t.Error("poseidon signature should not verify with blake2b hasher")
+	}
+}
+
+func TestPoseidonHasherDomainSeparation(t *testing.T) {
+	g := &bjj.BJJ{}
+	h := NewPoseidonHasher()
+
+	// Test that different hash functions produce different outputs for same input
+	input := []byte("test input")
+
+	h1 := h.H1(g, input, input, input)
+	h2 := h.H2(g, make([]byte, 32), make([]byte, 32), input)
+	h3 := h.H3(g, input, input, input)
+
+	if h1.Equal(h3) {
+		t.Error("H1 and H3 should produce different outputs (different domains)")
+	}
+
+	// H2 uses different input format, so comparison is less meaningful
+	// but verify it's not zero
+	if h2.IsZero() {
+		t.Error("H2 should not produce zero")
+	}
+
+	// Test determinism
+	h1Again := h.H1(g, input, input, input)
+	if !h1.Equal(h1Again) {
+		t.Error("H1 should be deterministic")
+	}
+}
+
+func TestPoseidonHasherH4H5(t *testing.T) {
+	g := &bjj.BJJ{}
+	h := NewPoseidonHasher()
+
+	// Test H4 and H5 produce 32-byte outputs
+	msg := []byte("test message")
+	commitList := []byte("commitment list data")
+
+	h4Out := h.H4(g, msg)
+	h5Out := h.H5(g, commitList)
+
+	if len(h4Out) != 32 {
+		t.Errorf("H4 should return 32 bytes, got %d", len(h4Out))
+	}
+
+	if len(h5Out) != 32 {
+		t.Errorf("H5 should return 32 bytes, got %d", len(h5Out))
+	}
+
+	// Test that H4 and H5 produce different outputs for different domains
+	h4WithCommit := h.H4(g, commitList)
+	h5WithMsg := h.H5(g, msg)
+
+	if string(h4Out) == string(h5WithMsg) {
+		t.Error("H4(msg) should differ from H5(msg) due to domain separation")
+	}
+
+	if string(h4WithCommit) == string(h5Out) {
+		t.Error("H4(commit) should differ from H5(commit) due to domain separation")
+	}
+}
