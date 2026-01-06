@@ -6,6 +6,11 @@ import (
 	"github.com/f3rmion/fy/group"
 )
 
+// Errors returned by the FROST protocol.
+var (
+	ErrInvalidCommitment = errors.New("invalid or empty commitment list")
+)
+
 // FROST holds the cryptographic group and threshold parameters for the
 // FROST signature scheme. Create instances using [New] or [NewWithHasher].
 type FROST struct {

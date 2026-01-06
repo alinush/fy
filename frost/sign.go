@@ -122,6 +122,42 @@ func (f *FROST) SignRound2(
 	}, nil
 }
 
+// ComputeGroupCommitment computes the aggregate nonce commitment R from all
+// signing commitments. This is useful for coordinators that need to compute
+// the challenge externally (e.g., for circomlibjs compatibility).
+//
+// The computation is: R = Σ (D_i + ρ_i * E_i)
+// where ρ_i = H1(i, msg, commitments) is the binding factor for participant i.
+//
+// The returned point R can be used to compute an external challenge:
+//
+//	c = poseidon([R.x, R.y, A.x, A.y, msg])
+//
+// This is particularly useful when signers (e.g., Ledger devices) need to
+// receive a pre-computed challenge rather than computing it internally.
+func (f *FROST) ComputeGroupCommitment(message []byte, commitments []*SigningCommitment) (group.Point, error) {
+	if len(commitments) == 0 {
+		return nil, ErrInvalidCommitment
+	}
+
+	// Encode commitment list for binding factor computation
+	encCommitList := f.encodeCommitments(commitments)
+
+	// Compute binding factors for each signer using H1
+	bindingFactors := f.computeBindingFactors(message, encCommitList, commitments)
+
+	// Compute group commitment R = sum(D_i + rho_i * E_i)
+	R := f.group.NewPoint()
+	for _, comm := range commitments {
+		rho := bindingFactors[string(comm.ID.Bytes())]
+		rhoE := f.group.NewPoint().ScalarMult(rho, comm.BindingPoint)
+		term := f.group.NewPoint().Add(comm.HidingPoint, rhoE)
+		R = f.group.NewPoint().Add(R, term)
+	}
+
+	return R, nil
+}
+
 // Aggregate combines individual signature shares into a complete Schnorr
 // signature. The resulting signature can be verified using [FROST.Verify].
 //
