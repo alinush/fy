@@ -2,7 +2,7 @@
 
 A Go library implementing the FROST (Flexible Round-Optimized Schnorr Threshold) signature scheme with a curve-agnostic design.
 
-FROST enables t-of-n threshold signatures where any t participants can collaboratively sign a message without reconstructing the private key. This implementation includes a Baby Jubjub elliptic curve adapter, making it suitable for use in zero-knowledge proof systems and privacy-preserving applications.
+FROST enables t-of-n threshold signatures where any t participants can collaboratively sign a message without reconstructing the private key. This implementation includes Baby Jubjub elliptic curve adapters, making it suitable for use in zero-knowledge proof systems and privacy-preserving applications like Railgun.
 
 
 ## Installation
@@ -10,6 +10,17 @@ FROST enables t-of-n threshold signatures where any t participants can collabora
 ```
 go get github.com/f3rmion/fy
 ```
+
+
+## Features
+
+- **Curve-agnostic FROST**: Works with any elliptic curve implementing the `group.Group` interface
+- **Baby Jubjub support**: Two implementations for different use cases:
+  - `BJJ`: Standard implementation using gnark-crypto (A=-1 parameterization)
+  - `CircomBJJ`: circomlibjs-compatible implementation (A=168700, D=168696)
+- **Multiple hashers**: SHA-256, Blake2b (Ledger-compatible), Poseidon (zkSNARK-optimized), and Railgun-compatible
+- **Railgun integration**: Threshold signatures compatible with `eddsa.verifyPoseidon`
+- **Session management**: High-level API for multi-party signing sessions
 
 
 ## Usage
@@ -95,9 +106,49 @@ sig, _ := f.Aggregate(message, commitments, sigShares)
 valid := f.Verify(message, sig, groupKey)
 ```
 
+### Railgun Integration
+
+For Railgun protocol compatibility, use the `railgun` package which produces signatures verifiable by circomlibjs `eddsa.verifyPoseidon`:
+
+```go
+import (
+    "crypto/rand"
+    "github.com/f3rmion/fy/railgun"
+)
+
+func main() {
+    // Create a 2-of-3 threshold wallet
+    tw, _ := railgun.NewThresholdWallet(2, 3)
+
+    // Run DKG to generate shares
+    shares, _ := tw.GenerateShares(rand.Reader)
+
+    // Get the circomlibjs-compatible public key (A = Y/8)
+    pkX, pkY := shares[0].SpendingPublicKey()
+
+    // Sign a message (e.g., Railgun sighash)
+    message := sighash.Bytes() // 32-byte Poseidon hash
+    sig, _ := tw.Sign(shares[:2], message)
+
+    // Get signature components for circomlibjs verification
+    rx, ry, s := sig.Components()
+}
+```
+
+The signature can be verified in TypeScript with circomlibjs:
+
+```typescript
+import { eddsa } from '@railgun-community/circomlibjs';
+
+const pubkey: [bigint, bigint] = [pkX, pkY];
+const signature = { R8: [rx, ry], S: s };
+
+const isValid = eddsa.verifyPoseidon(message, signature, pubkey);
+```
+
 ### Hash Function Configuration
 
-FROST uses hash functions for binding factors and Schnorr challenges. By default, SHA-256 is used. For Ledger/iden3 compatibility, use the Blake2b hasher with domain separation:
+FROST uses hash functions for binding factors and Schnorr challenges. Multiple hashers are available:
 
 ```go
 // Default: SHA-256 hasher
@@ -105,9 +156,20 @@ f, _ := frost.New(g, 2, 3)
 
 // Ledger compatible: Blake2b-512 with domain separation
 f, _ := frost.NewWithHasher(g, 2, 3, frost.NewBlake2bHasher())
+
+// zkSNARK optimized: Poseidon hash
+f, _ := frost.NewWithHasher(g, 2, 3, frost.NewPoseidonHasher())
+
+// Railgun compatible: Poseidon with circomlibjs challenge computation
+f, _ := frost.NewWithHasher(g, 2, 3, frost.NewRailgunHasher())
 ```
 
-The Blake2b hasher uses the domain separation prefix "FROST-EDBABYJUJUB-BLAKE512-v1" and interprets hash output as little-endian before reducing modulo the curve order, matching Ledger's FROST implementation.
+| Hasher | Use Case |
+|--------|----------|
+| `SHA256Hasher` | General purpose, default |
+| `Blake2bHasher` | Ledger hardware wallet compatibility |
+| `PoseidonHasher` | zkSNARK circuit verification |
+| `RailgunHasher` | circomlibjs `eddsa.verifyPoseidon` compatibility |
 
 You can implement custom hashers by satisfying the Hasher interface:
 
@@ -127,8 +189,10 @@ type Hasher interface {
 ```
 fy/
 ├── group/    # Abstract interfaces for cryptographic groups
-├── bjj/      # Baby Jubjub curve implementation
+├── bjj/      # Baby Jubjub curve implementations
 ├── frost/    # FROST threshold signature protocol
+├── railgun/  # Railgun protocol adapter
+├── session/  # High-level session management
 ├── go.mod
 └── go.sum
 ```
@@ -137,35 +201,82 @@ fy/
 
 Defines the core interfaces that abstract over elliptic curve operations:
 
-- Group: Factory for scalars and points, provides the generator and random scalar generation
-- Scalar: Field element arithmetic (add, subtract, multiply, invert)
-- Point: Group element operations (add, subtract, scalar multiplication)
+- `Group`: Factory for scalars and points, provides the generator and random scalar generation
+- `Scalar`: Field element arithmetic (add, subtract, multiply, invert)
+- `Point`: Group element operations (add, subtract, scalar multiplication)
 
 ### bjj
 
-Implements the group interfaces for the Baby Jubjub twisted Edwards curve. Baby Jubjub is defined over the BN254 scalar field and is commonly used in zero-knowledge proof systems like those in Ethereum.
+Implements the group interfaces for Baby Jubjub twisted Edwards curves:
 
-This package wraps gnark-crypto's Baby Jubjub implementation.
+| Type | Curve Parameters | Generator | Use Case |
+|------|------------------|-----------|----------|
+| `BJJ` | A=-1 (gnark-crypto) | Standard | General FROST signing |
+| `CircomBJJ` | A=168700, D=168696 | Base8 | circomlibjs/Railgun compatibility |
+
+**CircomBJJ** uses the same curve parameters as `@railgun-community/circomlibjs`, enabling signatures that verify with `eddsa.verifyPoseidon`.
 
 ### frost
 
 Implements the FROST protocol with two main phases:
 
-- Distributed Key Generation (DKG): Participants jointly generate key shares without a trusted dealer
-- Threshold Signing: Any t-of-n participants can collaboratively produce a valid Schnorr signature
+- **Distributed Key Generation (DKG)**: Participants jointly generate key shares without a trusted dealer
+- **Threshold Signing**: Any t-of-n participants can collaboratively produce a valid Schnorr signature
 
-The implementation is curve-agnostic and accepts any group.Group implementation.
+The implementation is curve-agnostic and accepts any `group.Group` implementation.
+
+### railgun
+
+Provides a high-level adapter for Railgun protocol integration:
+
+- `ThresholdWallet`: Manages FROST threshold signing for Railgun transactions
+- `Signature`: Railgun-compatible signature format (R.x, R.y, S)
+- `SpendingPublicKey()`: Returns the circomlibjs-compatible public key (Y/8)
+- Key derivation utilities for viewing keys, master public keys, and nullifiers
+
+### session
+
+High-level session management for coordinating multi-party signing:
+
+- `Session`: Manages the state of a signing session across multiple participants
+- Handles commitment collection, message distribution, and signature aggregation
+
+
+## Baby Jubjub Curve Compatibility
+
+This library supports two Baby Jubjub parameterizations:
+
+### Standard (gnark-crypto)
+```
+Curve: -x² + y² = 1 + d·x²·y²
+A = -1
+D = 12181644023421730124874158521699555681764249180949974110617291017600649128846
+```
+
+### circomlibjs
+```
+Curve: A·x² + y² = 1 + D·x²·y²
+A = 168700
+D = 168696
+Generator = Base8 (cofactor-cleared point)
+```
+
+The circomlibjs parameterization is required for Railgun compatibility because `eddsa.verifyPoseidon` uses:
+- Challenge: `c = poseidon([R.x, R.y, A.x, A.y, msg])`
+- Verification: `S * Base8 = R + (c * 8) * A`
+
+Where `A = Y/8` (the FROST group key divided by 8).
 
 
 ## Adding a New Curve
 
 To use FROST with a different elliptic curve:
 
-1. Implement group.Scalar for your field elements
-2. Implement group.Point for your curve points
-3. Implement group.Group as a factory
+1. Implement `group.Scalar` for your field elements
+2. Implement `group.Point` for your curve points
+3. Implement `group.Group` as a factory
 
-See the bjj package for a reference implementation.
+See the `bjj` package for reference implementations.
 
 
 ## References
@@ -175,6 +286,9 @@ See the bjj package for a reference implementation.
 
 - Baby Jubjub Elliptic Curve
   https://eips.ethereum.org/EIPS/eip-2494
+
+- circomlibjs
+  https://github.com/iden3/circomlibjs
 
 
 ## License
