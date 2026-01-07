@@ -123,7 +123,7 @@ func TestGenerateInteropVectors(t *testing.T) {
 		// Get circomlibjs-compatible public key A = Y/8
 		gkX, gkY := shares[0].SpendingPublicKey()
 		// Also get the internal group key for local verification
-		groupKey := shares[0].KeyShare.GroupKey
+		groupKey := shares[0].SpendingKeyShare.GroupKey
 
 		// Simulate Railgun sighash: poseidon(merkleRoot, boundParams, nullifier, commitment)
 		merkleRoot := big.NewInt(12345)

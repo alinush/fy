@@ -35,6 +35,7 @@ import (
 	"github.com/f3rmion/fy/bjj"
 	"github.com/f3rmion/fy/frost"
 	"github.com/f3rmion/fy/group"
+	"github.com/f3rmion/fy/secp256k1"
 	"github.com/iden3/go-iden3-crypto/poseidon"
 )
 
@@ -106,11 +107,16 @@ func FromFROSTSignature(sig *frost.Signature) (*Signature, error) {
 }
 
 // ThresholdWallet manages FROST threshold signing for Railgun transactions.
+// It maintains two FROST instances:
+//   - shieldFROST: secp256k1 curve for Ethereum-compatible shield signatures
+//   - spendingFROST: Baby JubJub curve for ZK-compatible transfer/unshield signatures
 type ThresholdWallet struct {
-	frost     *frost.FROST
-	group     *bjj.CircomBJJ
-	threshold int
-	total     int
+	shieldFROST   *frost.FROST   // secp256k1 for shield operations
+	shieldGroup   *secp256k1.Secp256k1
+	spendingFROST *frost.FROST   // BJJ for transfer/unshield operations
+	spendingGroup *bjj.CircomBJJ
+	threshold     int
+	total         int
 }
 
 // NewThresholdWallet creates a new threshold wallet with the specified parameters.
@@ -118,29 +124,49 @@ type ThresholdWallet struct {
 // threshold is the minimum number of signers required (M in M-of-N).
 // total is the total number of participants (N in M-of-N).
 //
-// The wallet uses Baby JubJub curve with the circomlibjs-compatible Base8 generator.
-// Signatures produced can be verified with circomlibjs eddsa.verifyPoseidon.
+// The wallet initializes two FROST instances:
+//   - secp256k1 with Secp256k1Hasher for shield operations (Ethereum-compatible)
+//   - Baby JubJub with RailgunHasher for transfer/unshield operations (ZK-compatible)
 func NewThresholdWallet(threshold, total int) (*ThresholdWallet, error) {
-	g := bjj.NewCircomBJJ()
-	f, err := frost.NewWithHasher(g, threshold, total, frost.NewRailgunHasher())
+	// secp256k1 for shield operations
+	shieldG := secp256k1.New()
+	shieldF, err := frost.NewWithHasher(shieldG, threshold, total, frost.NewSecp256k1Hasher())
+	if err != nil {
+		return nil, err
+	}
+
+	// Baby JubJub for transfer/unshield operations
+	spendingG := bjj.NewCircomBJJ()
+	spendingF, err := frost.NewWithHasher(spendingG, threshold, total, frost.NewRailgunHasher())
 	if err != nil {
 		return nil, err
 	}
 
 	return &ThresholdWallet{
-		frost:     f,
-		group:     g,
-		threshold: threshold,
-		total:     total,
+		shieldFROST:   shieldF,
+		shieldGroup:   shieldG,
+		spendingFROST: spendingF,
+		spendingGroup: spendingG,
+		threshold:     threshold,
+		total:         total,
 	}, nil
 }
 
-// Share represents a participant's key share for threshold signing.
+// Share represents a participant's key shares for threshold signing.
+// Each participant holds shares for both curves.
 type Share struct {
 	// ID is the participant identifier (1 to N).
 	ID int
-	// KeyShare is the underlying FROST key share.
-	KeyShare *frost.KeyShare
+	// ShieldKeyShare is the secp256k1 FROST key share for shield operations.
+	ShieldKeyShare *frost.KeyShare
+	// SpendingKeyShare is the BJJ FROST key share for transfer/unshield operations.
+	SpendingKeyShare *frost.KeyShare
+}
+
+// KeyShare returns the spending key share for backward compatibility.
+// Deprecated: Use SpendingKeyShare directly.
+func (s *Share) KeyShare() *frost.KeyShare {
+	return s.SpendingKeyShare
 }
 
 // SpendingPublicKey returns the circomlibjs-compatible spending public key as (X, Y) coordinates.
@@ -153,7 +179,7 @@ type Share struct {
 // This is the same for all participants.
 func (s *Share) SpendingPublicKey() (*big.Int, *big.Int) {
 	// Get the FROST group key
-	cp, ok := s.KeyShare.GroupKey.(*bjj.CircomPoint)
+	cp, ok := s.SpendingKeyShare.GroupKey.(*bjj.CircomPoint)
 	if !ok {
 		panic("group key must be CircomPoint for Railgun compatibility")
 	}
@@ -170,7 +196,7 @@ func (s *Share) SpendingPublicKey() (*big.Int, *big.Int) {
 // This is Y = total_sk * Base8, NOT the circomlibjs-compatible public key A = Y/8.
 // Use SpendingPublicKey() for circomlibjs verification.
 func (s *Share) InternalGroupKey() (*big.Int, *big.Int) {
-	cp, ok := s.KeyShare.GroupKey.(*bjj.CircomPoint)
+	cp, ok := s.SpendingKeyShare.GroupKey.(*bjj.CircomPoint)
 	if !ok {
 		panic("group key must be CircomPoint for Railgun compatibility")
 	}
@@ -181,8 +207,26 @@ func (s *Share) InternalGroupKey() (*big.Int, *big.Int) {
 	return x, y
 }
 
-// GenerateShares runs distributed key generation to create key shares.
-// Returns shares for all N participants.
+// ShieldPublicKey returns the secp256k1 group public key for shield operations.
+// This is an Ethereum-compatible public key that can be used to derive shield keys.
+// Returns the compressed (33-byte) public key bytes.
+func (s *Share) ShieldPublicKey() []byte {
+	return s.ShieldKeyShare.GroupKey.Bytes()
+}
+
+// ShieldPublicKeyUncompressed returns the secp256k1 group public key in uncompressed format.
+// Returns 65 bytes: 0x04 || X (32 bytes) || Y (32 bytes).
+func (s *Share) ShieldPublicKeyUncompressed() []byte {
+	p, ok := s.ShieldKeyShare.GroupKey.(*secp256k1.Point)
+	if !ok {
+		panic("shield group key must be secp256k1.Point")
+	}
+	return p.UncompressedBytes()
+}
+
+// GenerateShares runs distributed key generation for both curves.
+// Returns shares for all N participants, each containing both shield (secp256k1)
+// and spending (Baby JubJub) key shares.
 //
 // In a real deployment, this would be run as an interactive protocol
 // between participants. This method simulates the full DKG for testing.
@@ -191,10 +235,37 @@ func (tw *ThresholdWallet) GenerateShares(random io.Reader) ([]*Share, error) {
 		random = rand.Reader
 	}
 
+	// Run secp256k1 DKG for shield operations
+	shieldKeyShares, err := tw.runDKG(tw.shieldFROST, random)
+	if err != nil {
+		return nil, err
+	}
+
+	// Run BJJ DKG for spending operations
+	spendingKeyShares, err := tw.runDKG(tw.spendingFROST, random)
+	if err != nil {
+		return nil, err
+	}
+
+	// Combine into Share structs
+	shares := make([]*Share, tw.total)
+	for i := 0; i < tw.total; i++ {
+		shares[i] = &Share{
+			ID:               i + 1,
+			ShieldKeyShare:   shieldKeyShares[i],
+			SpendingKeyShare: spendingKeyShares[i],
+		}
+	}
+
+	return shares, nil
+}
+
+// runDKG runs a single DKG protocol for the given FROST instance.
+func (tw *ThresholdWallet) runDKG(f *frost.FROST, random io.Reader) ([]*frost.KeyShare, error) {
 	// Create participants
 	participants := make([]*frost.Participant, tw.total)
 	for i := 0; i < tw.total; i++ {
-		p, err := tw.frost.NewParticipant(random, i+1)
+		p, err := f.NewParticipant(random, i+1)
 		if err != nil {
 			return nil, err
 		}
@@ -214,10 +285,10 @@ func (tw *ThresholdWallet) GenerateShares(random io.Reader) ([]*Share, error) {
 				continue
 			}
 			// Sender sends to recipient j+1
-			privateData := tw.frost.Round1PrivateSend(sender, j+1)
+			privateData := f.Round1PrivateSend(sender, j+1)
 
 			// Recipient verifies and stores
-			err := tw.frost.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments)
+			err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments)
 			if err != nil {
 				return nil, err
 			}
@@ -225,19 +296,16 @@ func (tw *ThresholdWallet) GenerateShares(random io.Reader) ([]*Share, error) {
 	}
 
 	// Finalize: Produce key shares
-	shares := make([]*Share, tw.total)
+	keyShares := make([]*frost.KeyShare, tw.total)
 	for i, p := range participants {
-		keyShare, err := tw.frost.Finalize(p, broadcasts)
+		ks, err := f.Finalize(p, broadcasts)
 		if err != nil {
 			return nil, err
 		}
-		shares[i] = &Share{
-			ID:       i + 1,
-			KeyShare: keyShare,
-		}
+		keyShares[i] = ks
 	}
 
-	return shares, nil
+	return keyShares, nil
 }
 
 // SigningSession manages a threshold signing operation.
@@ -273,7 +341,7 @@ func (ss *SigningSession) Round1(random io.Reader) ([]*frost.SigningCommitment, 
 	}
 
 	for i, signer := range ss.signers {
-		nonce, commitment, err := ss.tw.frost.SignRound1(random, signer.KeyShare)
+		nonce, commitment, err := ss.tw.spendingFROST.SignRound1(random, signer.SpendingKeyShare)
 		if err != nil {
 			return nil, err
 		}
@@ -290,7 +358,7 @@ func (ss *SigningSession) Round2() (*Signature, error) {
 	sigShares := make([]*frost.SignatureShare, len(ss.signers))
 
 	for i, signer := range ss.signers {
-		share, err := ss.tw.frost.SignRound2(signer.KeyShare, ss.nonces[i], ss.message, ss.commitments)
+		share, err := ss.tw.spendingFROST.SignRound2(signer.SpendingKeyShare, ss.nonces[i], ss.message, ss.commitments)
 		if err != nil {
 			return nil, err
 		}
@@ -298,7 +366,7 @@ func (ss *SigningSession) Round2() (*Signature, error) {
 	}
 
 	// Aggregate into final signature
-	frostSig, err := ss.tw.frost.Aggregate(ss.message, ss.commitments, sigShares)
+	frostSig, err := ss.tw.spendingFROST.Aggregate(ss.message, ss.commitments, sigShares)
 	if err != nil {
 		return nil, err
 	}
@@ -322,10 +390,11 @@ func (tw *ThresholdWallet) Sign(signers []*Share, message []byte) (*Signature, e
 	return session.Round2()
 }
 
-// Verify verifies a signature against the group public key.
+// Verify verifies a spending signature against the group public key.
+// This is for BJJ signatures used in transfer/unshield operations.
 func (tw *ThresholdWallet) Verify(groupKey group.Point, message []byte, sig *Signature) bool {
 	// Reconstruct FROST signature
-	r := tw.group.NewPoint().(*bjj.CircomPoint)
+	r := tw.spendingGroup.NewPoint().(*bjj.CircomPoint)
 
 	// Set R from coordinates
 	rBytes := make([]byte, 64)
@@ -335,7 +404,7 @@ func (tw *ThresholdWallet) Verify(groupKey group.Point, message []byte, sig *Sig
 		return false
 	}
 
-	z := tw.group.NewScalar()
+	z := tw.spendingGroup.NewScalar()
 	z.SetBytes(sig.S.Bytes())
 
 	frostSig := &frost.Signature{
@@ -343,7 +412,93 @@ func (tw *ThresholdWallet) Verify(groupKey group.Point, message []byte, sig *Sig
 		Z: z,
 	}
 
-	return tw.frost.Verify(message, frostSig, groupKey)
+	return tw.spendingFROST.Verify(message, frostSig, groupKey)
+}
+
+// ShieldSignature represents a secp256k1 Schnorr signature for shield operations.
+// It consists of a nonce point R and response scalar Z.
+type ShieldSignature struct {
+	// R is the nonce point (33 bytes compressed, or 65 bytes uncompressed)
+	R group.Point
+	// Z is the response scalar (32 bytes)
+	Z group.Scalar
+}
+
+// RBytes returns the R component as compressed bytes (33 bytes).
+func (s *ShieldSignature) RBytes() []byte {
+	return s.R.Bytes()
+}
+
+// ZBytes returns the Z component as bytes (32 bytes).
+func (s *ShieldSignature) ZBytes() []byte {
+	return s.Z.Bytes()
+}
+
+// ToEthereumSignature converts to Ethereum-compatible (r, s, v) format.
+// Note: Recovery of v requires trying both possibilities.
+// Returns (r, s) where r = R.X and s = Z (may need low-S normalization).
+func (s *ShieldSignature) ToEthereumSignature() (r, sVal []byte) {
+	// Get R as uncompressed to extract X coordinate
+	p, ok := s.R.(*secp256k1.Point)
+	if !ok {
+		return nil, nil
+	}
+	uncompressed := p.UncompressedBytes()
+	// r = R.X (bytes 1-32 of uncompressed, skipping 0x04 prefix)
+	r = uncompressed[1:33]
+	// s = Z
+	sVal = s.Z.Bytes()
+	return r, sVal
+}
+
+// ShieldSign performs threshold signing for shield operations using secp256k1.
+// This produces a Schnorr signature that can be converted to Ethereum format.
+func (tw *ThresholdWallet) ShieldSign(signers []*Share, message []byte) (*ShieldSignature, error) {
+	if len(signers) < tw.threshold {
+		return nil, errors.New("insufficient signers for threshold")
+	}
+
+	// Round 1: Generate nonces and commitments
+	nonces := make([]*frost.SigningNonce, len(signers))
+	commitments := make([]*frost.SigningCommitment, len(signers))
+	for i, signer := range signers {
+		n, c, err := tw.shieldFROST.SignRound1(rand.Reader, signer.ShieldKeyShare)
+		if err != nil {
+			return nil, err
+		}
+		nonces[i] = n
+		commitments[i] = c
+	}
+
+	// Round 2: Generate signature shares
+	sigShares := make([]*frost.SignatureShare, len(signers))
+	for i, signer := range signers {
+		share, err := tw.shieldFROST.SignRound2(signer.ShieldKeyShare, nonces[i], message, commitments)
+		if err != nil {
+			return nil, err
+		}
+		sigShares[i] = share
+	}
+
+	// Aggregate into final signature
+	frostSig, err := tw.shieldFROST.Aggregate(message, commitments, sigShares)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ShieldSignature{
+		R: frostSig.R,
+		Z: frostSig.Z,
+	}, nil
+}
+
+// VerifyShield verifies a shield signature against the shield group public key.
+func (tw *ThresholdWallet) VerifyShield(groupKey group.Point, message []byte, sig *ShieldSignature) bool {
+	frostSig := &frost.Signature{
+		R: sig.R,
+		Z: sig.Z,
+	}
+	return tw.shieldFROST.Verify(message, frostSig, groupKey)
 }
 
 // DeriveViewingKey derives the Railgun viewing key from the group public key.

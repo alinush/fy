@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/f3rmion/fy/bjj"
+	"github.com/f3rmion/fy/secp256k1"
 )
 
 func TestDKGAndSign(t *testing.T) {
@@ -956,4 +957,190 @@ func TestComputeGroupCommitment(t *testing.T) {
 			t.Error("signature verification failed")
 		}
 	})
+}
+
+func TestSecp256k1Hasher(t *testing.T) {
+	g := secp256k1.New()
+	threshold := 2
+	total := 3
+
+	// Use Secp256k1Hasher
+	f, err := NewWithHasher(g, threshold, total, NewSecp256k1Hasher())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run DKG
+	participants := make([]*Participant, total)
+	for i := 0; i < total; i++ {
+		p, err := f.NewParticipant(rand.Reader, i+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		participants[i] = p
+	}
+
+	broadcasts := make([]*Round1Data, total)
+	for i, p := range participants {
+		broadcasts[i] = p.Round1Broadcast()
+	}
+
+	for i, sender := range participants {
+		for j := 0; j < total; j++ {
+			if i == j {
+				continue
+			}
+			privateData := f.Round1PrivateSend(sender, j+1)
+			if err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	keyShares := make([]*KeyShare, total)
+	for i, p := range participants {
+		ks, err := f.Finalize(p, broadcasts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyShares[i] = ks
+	}
+
+	// Verify all participants have the same group key
+	for i := 1; i < total; i++ {
+		if !keyShares[i].GroupKey.Equal(keyShares[0].GroupKey) {
+			t.Error("participants have different group keys")
+		}
+	}
+
+	// Sign with secp256k1 hasher
+	message := []byte("test message with secp256k1")
+	signers := keyShares[:threshold]
+
+	nonces := make([]*SigningNonce, threshold)
+	commitments := make([]*SigningCommitment, threshold)
+	for i, ks := range signers {
+		n, c, err := f.SignRound1(rand.Reader, ks)
+		if err != nil {
+			t.Fatal(err)
+		}
+		nonces[i] = n
+		commitments[i] = c
+	}
+
+	sigShares := make([]*SignatureShare, threshold)
+	for i, ks := range signers {
+		ss, err := f.SignRound2(ks, nonces[i], message, commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sigShares[i] = ss
+	}
+
+	sig, err := f.Aggregate(message, commitments, sigShares)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify signature
+	if !f.Verify(message, sig, keyShares[0].GroupKey) {
+		t.Error("signature verification failed with secp256k1 hasher")
+	}
+
+	// Verify wrong message fails
+	if f.Verify([]byte("wrong message"), sig, keyShares[0].GroupKey) {
+		t.Error("signature should not verify with wrong message")
+	}
+}
+
+func TestSecp256k1WithDifferentThresholds(t *testing.T) {
+	g := secp256k1.New()
+
+	configs := []struct {
+		threshold int
+		total     int
+	}{
+		{2, 3},
+		{2, 5},
+		{3, 5},
+	}
+
+	for _, cfg := range configs {
+		name := fmt.Sprintf("%d_of_%d", cfg.threshold, cfg.total)
+		t.Run(name, func(t *testing.T) {
+			f, err := NewWithHasher(g, cfg.threshold, cfg.total, NewSecp256k1Hasher())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Run DKG
+			participants := make([]*Participant, cfg.total)
+			for i := 0; i < cfg.total; i++ {
+				p, err := f.NewParticipant(rand.Reader, i+1)
+				if err != nil {
+					t.Fatal(err)
+				}
+				participants[i] = p
+			}
+
+			broadcasts := make([]*Round1Data, cfg.total)
+			for i, p := range participants {
+				broadcasts[i] = p.Round1Broadcast()
+			}
+
+			for i, sender := range participants {
+				for j := 0; j < cfg.total; j++ {
+					if i == j {
+						continue
+					}
+					privateData := f.Round1PrivateSend(sender, j+1)
+					if err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+
+			keyShares := make([]*KeyShare, cfg.total)
+			for i, p := range participants {
+				ks, err := f.Finalize(p, broadcasts)
+				if err != nil {
+					t.Fatal(err)
+				}
+				keyShares[i] = ks
+			}
+
+			// Sign with exactly threshold signers
+			message := []byte("secp256k1 threshold signing test")
+			signers := keyShares[:cfg.threshold]
+
+			nonces := make([]*SigningNonce, cfg.threshold)
+			commitments := make([]*SigningCommitment, cfg.threshold)
+			for i, ks := range signers {
+				n, c, err := f.SignRound1(rand.Reader, ks)
+				if err != nil {
+					t.Fatal(err)
+				}
+				nonces[i] = n
+				commitments[i] = c
+			}
+
+			sigShares := make([]*SignatureShare, cfg.threshold)
+			for i, ks := range signers {
+				ss, err := f.SignRound2(ks, nonces[i], message, commitments)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sigShares[i] = ss
+			}
+
+			sig, err := f.Aggregate(message, commitments, sigShares)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if !f.Verify(message, sig, keyShares[0].GroupKey) {
+				t.Error("signature verification failed")
+			}
+		})
+	}
 }

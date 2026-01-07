@@ -103,7 +103,7 @@ func TestThresholdSigning(t *testing.T) {
 	}
 
 	// Verify the signature
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 	if !tw.Verify(groupKey, message, sig) {
 		t.Error("Signature verification failed")
 	}
@@ -121,7 +121,7 @@ func TestSigningWithDifferentSubsets(t *testing.T) {
 	}
 
 	message := []byte("test message")
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 
 	// Test signing with different pairs
 	subsets := [][]*Share{
@@ -198,7 +198,7 @@ func TestSigningSessionRounds(t *testing.T) {
 	}
 
 	// Verify
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 	if !tw.Verify(groupKey, message, sig) {
 		t.Error("Signature verification failed")
 	}
@@ -215,7 +215,7 @@ func TestDeriveViewingKey(t *testing.T) {
 		t.Fatalf("GenerateShares() error = %v", err)
 	}
 
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 
 	// Derive viewing key
 	vk, err := DeriveViewingKey(groupKey)
@@ -229,7 +229,7 @@ func TestDeriveViewingKey(t *testing.T) {
 
 	// Verify all shares derive the same viewing key
 	for i, share := range shares {
-		vk2, err := DeriveViewingKey(share.KeyShare.GroupKey)
+		vk2, err := DeriveViewingKey(share.SpendingKeyShare.GroupKey)
 		if err != nil {
 			t.Errorf("Share %d: DeriveViewingKey() error = %v", i, err)
 			continue
@@ -252,7 +252,7 @@ func TestDeriveMasterPublicKey(t *testing.T) {
 		t.Fatalf("GenerateShares() error = %v", err)
 	}
 
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 
 	vk, err := DeriveViewingKey(groupKey)
 	if err != nil {
@@ -280,7 +280,7 @@ func TestComputeNullifier(t *testing.T) {
 		t.Fatalf("GenerateShares() error = %v", err)
 	}
 
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 
 	vk, err := DeriveViewingKey(groupKey)
 	if err != nil {
@@ -457,7 +457,7 @@ func TestWrongMessageVerification(t *testing.T) {
 		t.Fatalf("Sign() error = %v", err)
 	}
 
-	groupKey := shares[0].KeyShare.GroupKey
+	groupKey := shares[0].SpendingKeyShare.GroupKey
 
 	// Verify with correct message - should pass
 	if !tw.Verify(groupKey, message, sig) {
@@ -468,6 +468,175 @@ func TestWrongMessageVerification(t *testing.T) {
 	wrongMessage := []byte("wrong message")
 	if tw.Verify(groupKey, wrongMessage, sig) {
 		t.Error("Verification should fail with wrong message")
+	}
+}
+
+func TestShieldSign(t *testing.T) {
+	tw, err := NewThresholdWallet(2, 3)
+	if err != nil {
+		t.Fatalf("NewThresholdWallet() error = %v", err)
+	}
+
+	shares, err := tw.GenerateShares(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateShares() error = %v", err)
+	}
+
+	// Verify all shares have the same shield public key
+	shieldPubKey := shares[0].ShieldPublicKey()
+	for i := 1; i < len(shares); i++ {
+		if string(shares[i].ShieldPublicKey()) != string(shieldPubKey) {
+			t.Errorf("Share %d has different shield public key", i)
+		}
+	}
+
+	// Sign with shield (secp256k1) for shield operations
+	message := []byte("RAILGUN_SHIELD") // This would be keccak256("RAILGUN_SHIELD") in practice
+
+	sig, err := tw.ShieldSign(shares[:2], message)
+	if err != nil {
+		t.Fatalf("ShieldSign() error = %v", err)
+	}
+
+	// Verify signature components are non-nil
+	if sig.R == nil || sig.Z == nil {
+		t.Error("ShieldSignature has nil components")
+	}
+
+	// Verify the signature
+	shieldGroupKey := shares[0].ShieldKeyShare.GroupKey
+	if !tw.VerifyShield(shieldGroupKey, message, sig) {
+		t.Error("Shield signature verification failed")
+	}
+
+	// Verify wrong message fails
+	if tw.VerifyShield(shieldGroupKey, []byte("wrong message"), sig) {
+		t.Error("Shield signature should not verify with wrong message")
+	}
+}
+
+func TestShieldSignWithDifferentSubsets(t *testing.T) {
+	tw, err := NewThresholdWallet(2, 3)
+	if err != nil {
+		t.Fatalf("NewThresholdWallet() error = %v", err)
+	}
+
+	shares, err := tw.GenerateShares(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateShares() error = %v", err)
+	}
+
+	message := []byte("test shield message")
+	shieldGroupKey := shares[0].ShieldKeyShare.GroupKey
+
+	// Test signing with different pairs
+	subsets := [][]*Share{
+		{shares[0], shares[1]}, // 1,2
+		{shares[0], shares[2]}, // 1,3
+		{shares[1], shares[2]}, // 2,3
+	}
+
+	for i, subset := range subsets {
+		sig, err := tw.ShieldSign(subset, message)
+		if err != nil {
+			t.Errorf("Subset %d: ShieldSign() error = %v", i, err)
+			continue
+		}
+
+		if !tw.VerifyShield(shieldGroupKey, message, sig) {
+			t.Errorf("Subset %d: Shield signature verification failed", i)
+		}
+	}
+}
+
+func TestCombinedDKGProducesDifferentKeys(t *testing.T) {
+	tw, err := NewThresholdWallet(2, 3)
+	if err != nil {
+		t.Fatalf("NewThresholdWallet() error = %v", err)
+	}
+
+	shares, err := tw.GenerateShares(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateShares() error = %v", err)
+	}
+
+	// Shield (secp256k1) and spending (BJJ) keys should be different
+	shieldKey := shares[0].ShieldPublicKey()
+	spendingX, spendingY := shares[0].SpendingPublicKey()
+
+	// Convert spending key to bytes for comparison
+	spendingKeyBytes := append(spendingX.Bytes(), spendingY.Bytes()...)
+
+	if string(shieldKey) == string(spendingKeyBytes) {
+		t.Error("Shield and spending keys should be different (different curves)")
+	}
+
+	// Both should be non-zero
+	if len(shieldKey) == 0 {
+		t.Error("Shield key should not be empty")
+	}
+	if spendingX.Sign() == 0 && spendingY.Sign() == 0 {
+		t.Error("Spending key should not be zero")
+	}
+}
+
+func TestShieldPublicKeyFormats(t *testing.T) {
+	tw, err := NewThresholdWallet(2, 3)
+	if err != nil {
+		t.Fatalf("NewThresholdWallet() error = %v", err)
+	}
+
+	shares, err := tw.GenerateShares(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateShares() error = %v", err)
+	}
+
+	// Test compressed format
+	compressed := shares[0].ShieldPublicKey()
+	if len(compressed) != 33 {
+		t.Errorf("Compressed shield public key should be 33 bytes, got %d", len(compressed))
+	}
+	if compressed[0] != 0x02 && compressed[0] != 0x03 {
+		t.Errorf("Compressed key should start with 0x02 or 0x03, got 0x%02x", compressed[0])
+	}
+
+	// Test uncompressed format
+	uncompressed := shares[0].ShieldPublicKeyUncompressed()
+	if len(uncompressed) != 65 {
+		t.Errorf("Uncompressed shield public key should be 65 bytes, got %d", len(uncompressed))
+	}
+	if uncompressed[0] != 0x04 {
+		t.Errorf("Uncompressed key should start with 0x04, got 0x%02x", uncompressed[0])
+	}
+}
+
+func TestShieldSignatureToEthereum(t *testing.T) {
+	tw, err := NewThresholdWallet(2, 3)
+	if err != nil {
+		t.Fatalf("NewThresholdWallet() error = %v", err)
+	}
+
+	shares, err := tw.GenerateShares(rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateShares() error = %v", err)
+	}
+
+	message := []byte("test message")
+	sig, err := tw.ShieldSign(shares[:2], message)
+	if err != nil {
+		t.Fatalf("ShieldSign() error = %v", err)
+	}
+
+	r, s := sig.ToEthereumSignature()
+	if r == nil || s == nil {
+		t.Error("ToEthereumSignature() returned nil")
+	}
+
+	if len(r) != 32 {
+		t.Errorf("r should be 32 bytes, got %d", len(r))
+	}
+	if len(s) != 32 {
+		t.Errorf("s should be 32 bytes, got %d", len(s))
 	}
 }
 
