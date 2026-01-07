@@ -708,3 +708,252 @@ func TestPoseidonHasherH4H5(t *testing.T) {
 		t.Error("H4(commit) should differ from H5(commit) due to domain separation")
 	}
 }
+
+func TestComputeGroupCommitment(t *testing.T) {
+	g := &bjj.BJJ{}
+	threshold := 2
+	total := 3
+
+	f, err := New(g, threshold, total)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Run DKG
+	participants := make([]*Participant, total)
+	for i := 0; i < total; i++ {
+		p, err := f.NewParticipant(rand.Reader, i+1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		participants[i] = p
+	}
+
+	broadcasts := make([]*Round1Data, total)
+	for i, p := range participants {
+		broadcasts[i] = p.Round1Broadcast()
+	}
+
+	for i, sender := range participants {
+		for j := 0; j < total; j++ {
+			if i == j {
+				continue
+			}
+			privateData := f.Round1PrivateSend(sender, j+1)
+			if err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	keyShares := make([]*KeyShare, total)
+	for i, p := range participants {
+		ks, err := f.Finalize(p, broadcasts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		keyShares[i] = ks
+	}
+
+	t.Run("EmptyCommitments", func(t *testing.T) {
+		_, err := f.ComputeGroupCommitment([]byte("msg"), nil)
+		if err != ErrInvalidCommitment {
+			t.Errorf("expected ErrInvalidCommitment, got %v", err)
+		}
+
+		_, err = f.ComputeGroupCommitment([]byte("msg"), []*SigningCommitment{})
+		if err != ErrInvalidCommitment {
+			t.Errorf("expected ErrInvalidCommitment, got %v", err)
+		}
+	})
+
+	t.Run("MatchesAggregateR", func(t *testing.T) {
+		message := []byte("test group commitment")
+		signers := keyShares[:threshold]
+
+		// Generate nonces and commitments
+		nonces := make([]*SigningNonce, threshold)
+		commitments := make([]*SigningCommitment, threshold)
+		for i, ks := range signers {
+			n, c, err := f.SignRound1(rand.Reader, ks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonces[i] = n
+			commitments[i] = c
+		}
+
+		// Compute group commitment using the new function
+		R, err := f.ComputeGroupCommitment(message, commitments)
+		if err != nil {
+			t.Fatalf("ComputeGroupCommitment failed: %v", err)
+		}
+
+		// Generate signature shares and aggregate
+		sigShares := make([]*SignatureShare, threshold)
+		for i, ks := range signers {
+			ss, err := f.SignRound2(ks, nonces[i], message, commitments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sigShares[i] = ss
+		}
+
+		sig, err := f.Aggregate(message, commitments, sigShares)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Verify R from ComputeGroupCommitment matches R in the signature
+		if !R.Equal(sig.R) {
+			t.Error("ComputeGroupCommitment R does not match Aggregate R")
+		}
+	})
+
+	t.Run("Deterministic", func(t *testing.T) {
+		message := []byte("determinism test")
+		signers := keyShares[:threshold]
+
+		nonces := make([]*SigningNonce, threshold)
+		commitments := make([]*SigningCommitment, threshold)
+		for i, ks := range signers {
+			n, c, err := f.SignRound1(rand.Reader, ks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonces[i] = n
+			commitments[i] = c
+		}
+
+		// Compute twice with same inputs
+		R1, err := f.ComputeGroupCommitment(message, commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		R2, err := f.ComputeGroupCommitment(message, commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !R1.Equal(R2) {
+			t.Error("ComputeGroupCommitment should be deterministic")
+		}
+	})
+
+	t.Run("DifferentMessagesProduceDifferentR", func(t *testing.T) {
+		signers := keyShares[:threshold]
+
+		nonces := make([]*SigningNonce, threshold)
+		commitments := make([]*SigningCommitment, threshold)
+		for i, ks := range signers {
+			n, c, err := f.SignRound1(rand.Reader, ks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonces[i] = n
+			commitments[i] = c
+		}
+
+		R1, err := f.ComputeGroupCommitment([]byte("message 1"), commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		R2, err := f.ComputeGroupCommitment([]byte("message 2"), commitments)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Different messages should produce different binding factors, thus different R
+		if R1.Equal(R2) {
+			t.Error("different messages should produce different group commitments")
+		}
+	})
+
+	t.Run("WithPoseidonHasher", func(t *testing.T) {
+		fPoseidon, err := NewWithHasher(g, threshold, total, NewPoseidonHasher())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Run DKG with Poseidon
+		pParticipants := make([]*Participant, total)
+		for i := 0; i < total; i++ {
+			p, err := fPoseidon.NewParticipant(rand.Reader, i+1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pParticipants[i] = p
+		}
+
+		pBroadcasts := make([]*Round1Data, total)
+		for i, p := range pParticipants {
+			pBroadcasts[i] = p.Round1Broadcast()
+		}
+
+		for i, sender := range pParticipants {
+			for j := 0; j < total; j++ {
+				if i == j {
+					continue
+				}
+				privateData := fPoseidon.Round1PrivateSend(sender, j+1)
+				if err := fPoseidon.Round2ReceiveShare(pParticipants[j], privateData, pBroadcasts[i].Commitments); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+
+		pKeyShares := make([]*KeyShare, total)
+		for i, p := range pParticipants {
+			ks, err := fPoseidon.Finalize(p, pBroadcasts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			pKeyShares[i] = ks
+		}
+
+		message := []byte("poseidon group commitment test")
+		signers := pKeyShares[:threshold]
+
+		nonces := make([]*SigningNonce, threshold)
+		commitments := make([]*SigningCommitment, threshold)
+		for i, ks := range signers {
+			n, c, err := fPoseidon.SignRound1(rand.Reader, ks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			nonces[i] = n
+			commitments[i] = c
+		}
+
+		R, err := fPoseidon.ComputeGroupCommitment(message, commitments)
+		if err != nil {
+			t.Fatalf("ComputeGroupCommitment with Poseidon failed: %v", err)
+		}
+
+		// Generate signature and verify R matches
+		sigShares := make([]*SignatureShare, threshold)
+		for i, ks := range signers {
+			ss, err := fPoseidon.SignRound2(ks, nonces[i], message, commitments)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sigShares[i] = ss
+		}
+
+		sig, err := fPoseidon.Aggregate(message, commitments, sigShares)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if !R.Equal(sig.R) {
+			t.Error("ComputeGroupCommitment R does not match Aggregate R with Poseidon hasher")
+		}
+
+		// Verify the signature is valid
+		if !fPoseidon.Verify(message, sig, pKeyShares[0].GroupKey) {
+			t.Error("signature verification failed")
+		}
+	})
+}
