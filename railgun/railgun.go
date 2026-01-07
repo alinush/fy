@@ -111,9 +111,9 @@ func FromFROSTSignature(sig *frost.Signature) (*Signature, error) {
 //   - shieldFROST: secp256k1 curve for Ethereum-compatible shield signatures
 //   - spendingFROST: Baby JubJub curve for ZK-compatible transfer/unshield signatures
 type ThresholdWallet struct {
-	shieldFROST   *frost.FROST   // secp256k1 for shield operations
+	shieldFROST   *frost.FROST // secp256k1 for shield operations
 	shieldGroup   *secp256k1.Secp256k1
-	spendingFROST *frost.FROST   // BJJ for transfer/unshield operations
+	spendingFROST *frost.FROST // BJJ for transfer/unshield operations
 	spendingGroup *bjj.CircomBJJ
 	threshold     int
 	total         int
