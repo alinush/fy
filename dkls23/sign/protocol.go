@@ -389,4 +389,3 @@ func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s gro
 
 	return new(big.Int).SetBytes(pointX).Cmp(r) == 0
 }
-
