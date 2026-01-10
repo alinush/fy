@@ -219,10 +219,10 @@ func (p *Party) Phase3(
 		return nil, nil, errors.New("instance point is identity (very improbable)")
 	}
 
-	// Get x-coordinate of instance point
-	xBytes := dkls23.PointToBytes(totalInstancePoint)
-	// For secp256k1, x-coordinate is bytes 1-33 of compressed point
-	xCoord := xBytes[1:33]
+	// Get compressed point (33 bytes: 1 byte parity + 32 bytes x-coordinate)
+	// The parity byte (0x02=even, 0x03=odd) is needed for recovery ID
+	compressedR := dkls23.PointToBytes(totalInstancePoint)
+	xCoord := compressedR[1:33]
 
 	// Compute u, v, w
 	// u = instanceKey * firstSumUV + secondSumU
@@ -242,16 +242,25 @@ func (p *Party) Phase3(
 
 	broadcast := &Phase3Broadcast{U: u, W: w}
 
-	return xCoord, broadcast, nil
+	// Return full compressed point (33 bytes) so Phase4 can extract y-parity for recovery ID
+	return compressedR, broadcast, nil
 }
 
 // Phase4 executes signing phase 4 (Step 10 from Protocol 3.6)
+// compressedR is the 33-byte compressed nonce point (parity byte + 32-byte x-coordinate)
 func (p *Party) Phase4(
 	data *SignData,
-	xCoord []byte,
+	compressedR []byte,
 	received []*Phase3Broadcast,
 	normalize bool,
 ) (*Signature, error) {
+	// Extract x-coordinate and y-parity from compressed point
+	if len(compressedR) != 33 {
+		return nil, errors.New("compressedR must be 33 bytes")
+	}
+	parityByte := compressedR[0]
+	xCoord := compressedR[1:33]
+
 	// Sum all u and w values
 	numerator := dkls23.NewScalar()
 	denominator := dkls23.NewScalar()
@@ -268,15 +277,24 @@ func (p *Party) Phase4(
 	}
 	s := dkls23.ScalarMul(numerator, denominatorInv)
 
+	// Compute recovery ID from y-parity BEFORE normalization
+	// Recovery ID: 0 if y is even (parity byte 0x02), 1 if y is odd (parity byte 0x03)
+	var recoveryID uint8 = 0
+	if parityByte == 0x03 {
+		recoveryID = 1
+	}
+
 	// Normalize to low S form if requested
+	// When we negate S, we also need to flip the recovery ID
 	if normalize {
 		sBytes := s.Bytes()
 		halfOrder := new(big.Int).Rsh(secp256k1Order(), 1)
 		sInt := new(big.Int).SetBytes(sBytes)
 		if sInt.Cmp(halfOrder) > 0 {
 			// s = n - s
-			negS := dkls23.ScalarNeg(s)
-			s = negS
+			s = dkls23.ScalarNeg(s)
+			// Flip recovery ID when negating S
+			recoveryID ^= 1
 		}
 	}
 
@@ -284,9 +302,6 @@ func (p *Party) Phase4(
 	if !verifyECDSA(data.MessageHash, p.PublicKey, xCoord, s) {
 		return nil, errors.New("invalid ECDSA signature")
 	}
-
-	// Compute recovery ID
-	recoveryID := computeRecoveryID(xCoord, s, p.PublicKey, data.MessageHash)
 
 	var rBytes, sBytes [32]byte
 	copy(rBytes[:], xCoord)
@@ -375,16 +390,3 @@ func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s gro
 	return new(big.Int).SetBytes(pointX).Cmp(r) == 0
 }
 
-func computeRecoveryID(rBytes []byte, s group.Scalar, pk group.Point, msgHash dkls23.HashOutput) uint8 {
-	// This is a simplified recovery ID computation
-	// Full implementation would check y-parity and x-coordinate overflow
-	sBytes := s.Bytes()
-	sInt := new(big.Int).SetBytes(sBytes)
-	halfOrder := new(big.Int).Rsh(secp256k1Order(), 1)
-
-	var recID uint8 = 0
-	if sInt.Cmp(halfOrder) > 0 {
-		recID = 1
-	}
-	return recID
-}
