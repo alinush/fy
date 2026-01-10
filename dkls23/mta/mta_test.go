@@ -76,4 +76,3 @@ func TestMultiplication(t *testing.T) {
 		}
 	}
 }
-
