@@ -28,8 +28,8 @@ type FieldElement = [OTSecurity / 8]byte
 
 // ExtSender holds the OT extension sender's state
 type ExtSender struct {
-	Correlation []bool               // Choice bits (KAPPA bits)
-	Seeds       []dkls23.HashOutput  // Seeds from base OT
+	Correlation []bool              // Choice bits (KAPPA bits)
+	Seeds       []dkls23.HashOutput // Seeds from base OT
 }
 
 // ExtReceiver holds the OT extension receiver's state
@@ -57,7 +57,7 @@ func InitExtSenderPhase1(sessionID []byte) (*Receiver, []bool, []group.Scalar, [
 	correlation := make([]bool, Kappa)
 	randBytes, _ := dkls23.RandBytes(Kappa / 8)
 	for i := 0; i < Kappa; i++ {
-		correlation[i] = (randBytes[i/8] >> (i % 8)) & 1 == 1
+		correlation[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
 
 	vecR, encProofs := otReceiver.Phase1Batch(sessionID, correlation)
@@ -120,7 +120,7 @@ func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutpu
 	randomBits := make([]bool, OTSecurity)
 	randBytes, _ := dkls23.RandBytes(OTSecurity / 8)
 	for i := 0; i < OTSecurity; i++ {
-		randomBits[i] = (randBytes[i/8] >> (i % 8)) & 1 == 1
+		randomBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
 	extendedBits := append(choiceBits, randomBits...)
 
@@ -376,7 +376,7 @@ func prgExpand(seed dkls23.HashOutput, index uint16, sessionID []byte) PRGOutput
 }
 
 func cutAndTranspose(input []PRGOutput) [][Kappa / 8]byte {
-	output := make([][Kappa/8]byte, BatchSize)
+	output := make([][Kappa / 8]byte, BatchSize)
 
 	for rowByte := 0; rowByte < Kappa/8; rowByte++ {
 		for rowBit := 0; rowBit < 8; rowBit++ {

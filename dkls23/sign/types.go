@@ -31,16 +31,16 @@ type Party struct {
 
 // ZeroSeedPair represents the shared seed between two parties
 type ZeroSeedPair struct {
-	LowestIndex      bool
+	LowestIndex       bool
 	IndexCounterparty uint8
 	Seed              [dkls23.Security]byte
 }
 
 // SignData contains data needed to start signing
 type SignData struct {
-	SignID       []byte
+	SignID         []byte
 	Counterparties []uint8
-	MessageHash  dkls23.HashOutput
+	MessageHash    dkls23.HashOutput
 }
 
 // Phase1ToPhase2Transmit is sent from phase 1 to phase 2
@@ -60,10 +60,10 @@ type Phase1ToPhase2Keep struct {
 
 // UniqueKeep1to2 is data kept between phase 1 and 2 (same for all counterparties)
 type UniqueKeep1to2 struct {
-	InstanceKey    group.Scalar
-	InstancePoint  group.Point
-	InversionMask  group.Scalar
-	Zeta           group.Scalar
+	InstanceKey   group.Scalar
+	InstancePoint group.Point
+	InversionMask group.Scalar
+	Zeta          group.Scalar
 }
 
 // Phase2ToPhase3Transmit is sent from phase 2 to phase 3
@@ -81,20 +81,20 @@ type Phase2ToPhase3Transmit struct {
 
 // Phase2ToPhase3Keep is kept between phase 2 and phase 3
 type Phase2ToPhase3Keep struct {
-	CU          group.Scalar
-	CV          group.Scalar
-	Commitment  dkls23.HashOutput
-	MulKeep     *mta.DataToKeepReceiver
-	Chi         group.Scalar
+	CU         group.Scalar
+	CV         group.Scalar
+	Commitment dkls23.HashOutput
+	MulKeep    *mta.DataToKeepReceiver
+	Chi        group.Scalar
 }
 
 // UniqueKeep2to3 is data kept between phase 2 and 3
 type UniqueKeep2to3 struct {
-	InstanceKey    group.Scalar
-	InstancePoint  group.Point
-	InversionMask  group.Scalar
-	KeyShare       group.Scalar
-	PublicShare    group.Point
+	InstanceKey   group.Scalar
+	InstancePoint group.Point
+	InversionMask group.Scalar
+	KeyShare      group.Scalar
+	PublicShare   group.Point
 }
 
 // Phase3Broadcast is broadcast after phase 3
@@ -105,8 +105,8 @@ type Phase3Broadcast struct {
 
 // Signature represents the final ECDSA signature
 type Signature struct {
-	R        [32]byte
-	S        [32]byte
+	R          [32]byte
+	S          [32]byte
 	RecoveryID uint8
 }
 

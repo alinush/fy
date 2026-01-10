@@ -30,16 +30,16 @@ type Sender struct {
 
 // Receiver holds the receiver's state for the multiplication protocol
 type Receiver struct {
-	PublicGadget  []group.Scalar
-	OTEReceiver   *ot.ExtReceiver
+	PublicGadget []group.Scalar
+	OTEReceiver  *ot.ExtReceiver
 }
 
 // DataToReceiver is data transmitted from sender to receiver
 type DataToReceiver struct {
-	VectorOfTau  [][]group.Scalar
-	VerifyR      dkls23.HashOutput
-	VerifyU      []group.Scalar
-	GammaSender  []group.Scalar
+	VectorOfTau [][]group.Scalar
+	VerifyR     dkls23.HashOutput
+	VerifyU     []group.Scalar
+	GammaSender []group.Scalar
 }
 
 // DataToKeepReceiver is data kept by the receiver between phases
@@ -117,8 +117,8 @@ func InitReceiverPhase2(
 	publicGadget := computePublicGadget(nonce, sessionID)
 
 	return &Receiver{
-		PublicGadget:  publicGadget,
-		OTEReceiver:   oteReceiver,
+		PublicGadget: publicGadget,
+		OTEReceiver:  oteReceiver,
 	}, nil
 }
 
@@ -247,7 +247,7 @@ func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceive
 	randBytes, _ := dkls23.RandBytes(ot.BatchSize / 8)
 	b := dkls23.NewScalar()
 	for i := 0; i < ot.BatchSize; i++ {
-		choiceBits[i] = (randBytes[i/8] >> (i % 8)) & 1 == 1
+		choiceBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 		if choiceBits[i] {
 			b = dkls23.ScalarAdd(b, r.PublicGadget[i])
 		}

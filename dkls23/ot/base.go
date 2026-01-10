@@ -18,7 +18,7 @@ var ErrOTFailed = errors.New("OT protocol failed")
 
 // Sender holds the sender's state for the base OT protocol
 type Sender struct {
-	S     group.Scalar     // Secret scalar
+	S     group.Scalar      // Secret scalar
 	Proof *dkls23.DLogProof // Proof of discrete log for s * G
 }
 

@@ -235,7 +235,7 @@ func TestFixedPolynomials(t *testing.T) {
 	four := dkls23.NewScalar()
 	four.SetBytes([]byte{4})
 
-	fragments1 := []group.Scalar{one, two}   // p(1) = 3
+	fragments1 := []group.Scalar{one, two}    // p(1) = 3
 	fragments2 := []group.Scalar{three, four} // p(2) = 7
 
 	// Phase 2 (using Step3 directly for fixed polynomial test)

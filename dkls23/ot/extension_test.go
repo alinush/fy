@@ -82,7 +82,7 @@ func TestOTExtensionFullProtocol(t *testing.T) {
 	choiceBits := make([]bool, BatchSize)
 	randBytes, _ := dkls23.RandBytes(BatchSize / 8)
 	for i := 0; i < BatchSize; i++ {
-		choiceBits[i] = (randBytes[i/8] >> (i % 8)) & 1 == 1
+		choiceBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
 
 	// Run receiver phase 1

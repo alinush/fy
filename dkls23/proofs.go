@@ -66,9 +66,9 @@ func computeDLogChallenge(sessionID []byte, point, commitment group.Point) group
 // EncProof is a proof for the OT encryption step.
 // It proves knowledge of r for the OT protocol using a sigma-OR composition.
 type EncProof struct {
-	BaseH  group.Point  // h = Hash(receiver_id) * G
-	U      group.Point  // u = r * G
-	V      group.Point  // v point for OT
+	BaseH  group.Point // h = Hash(receiver_id) * G
+	U      group.Point // u = r * G
+	V      group.Point // v point for OT
 	Proof0 *EncSubProof
 	Proof1 *EncSubProof
 }
