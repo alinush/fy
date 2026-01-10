@@ -8,6 +8,9 @@ import (
 )
 
 func TestMultiplication(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive MTA test in short mode")
+	}
 	sessionID := []byte("test-multiplication")
 
 	// INITIALIZATION

@@ -24,6 +24,9 @@ func TestStep1And2(t *testing.T) {
 }
 
 func TestDKG2of2(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive OT-based test in short mode")
+	}
 	params := Parameters{Threshold: 2, ShareCount: 2}
 	sessionID := []byte("test-dkg-2of2")
 
@@ -109,6 +112,9 @@ func TestDKG2of2(t *testing.T) {
 }
 
 func TestDKG2of3(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive OT-based test in short mode")
+	}
 	params := Parameters{Threshold: 2, ShareCount: 3}
 	sessionID := []byte("test-dkg-2of3")
 

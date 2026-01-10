@@ -8,6 +8,9 @@ import (
 )
 
 func TestOTExtensionInit(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive OT test in short mode")
+	}
 	sessionID := []byte("test-ot-extension-init")
 
 	// Extension Sender Phase 1 (acts as base OT receiver)
@@ -55,6 +58,9 @@ func TestOTExtensionInit(t *testing.T) {
 }
 
 func TestOTExtensionFullProtocol(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive OT test in short mode")
+	}
 	sessionID := []byte("test-ot-extension-full")
 
 	// Initialize base OT
