@@ -1,35 +1,25 @@
 // Package dkls23 implements the DKLs23 threshold ECDSA protocol.
-// See https://eprint.iacr.org/2023/765.pdf for the paper.
+//
+// Ported to Go from https://github.com/0xCarbon/DKLs23
+// Licensed under MIT/Apache-2.0 (dual license).
 //
 // This package provides a Paillier-free threshold ECDSA implementation
 // using Oblivious Transfer (OT) for the MtA (Multiplicative-to-Additive)
 // conversion, resulting in faster key generation compared to GG20.
+// See https://eprint.iacr.org/2023/765.pdf for the paper.
 package dkls23
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"io"
 
 	"github.com/f3rmion/fy/group"
 	"github.com/f3rmion/fy/secp256k1"
-	"golang.org/x/crypto/sha3"
-)
-
-// Security parameters from DKLs23
-const (
-	// RawSecurity is the computational security parameter (lambda_c = kappa = 256 bits)
-	RawSecurity = 256
-	// Security is RawSecurity / 8 (32 bytes)
-	Security = 32
-	// StatSecurity is the statistical security parameter (lambda_s = 80 bits)
-	StatSecurity = 80
 )
 
 // Group is the secp256k1 group used for ECDSA
 var Group = secp256k1.New()
-
-// HashOutput is a 32-byte hash output
-type HashOutput [Security]byte
 
 // NewScalar creates a new zero scalar
 func NewScalar() group.Scalar {
@@ -111,11 +101,12 @@ func PointFromBytes(data []byte) (group.Point, error) {
 	return NewPoint().SetBytes(data)
 }
 
-// Hash computes SHA3-256 of the message with optional salt
+// Hash computes SHA-256 of the message with optional salt.
+// Following 0xCarbon: hash(salt || msg)
 func Hash(msg, salt []byte) HashOutput {
-	h := sha3.New256()
-	h.Write(msg)
+	h := sha256.New()
 	h.Write(salt)
+	h.Write(msg)
 	var out HashOutput
 	copy(out[:], h.Sum(nil))
 	return out

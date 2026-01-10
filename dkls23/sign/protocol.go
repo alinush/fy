@@ -231,8 +231,9 @@ func (p *Party) Phase3(
 	// v = keyShare * firstSumUV + secondSumV
 	v := dkls23.ScalarAdd(dkls23.ScalarMul(uniqueKept.KeyShare, firstSumUV), secondSumV)
 
-	// w = messageHash * inversionMask + v * xCoord
-	xScalar := dkls23.HashAsScalar(xCoord, nil)
+	// w = messageHash * inversionMask + v * r
+	// In ECDSA, r is the x-coordinate used directly as a scalar (mod n), NOT hashed
+	xScalar, _ := dkls23.ScalarFromBytes(xCoord)
 	msgScalar, _ := dkls23.ScalarFromBytes(data.MessageHash[:])
 	w := dkls23.ScalarAdd(
 		dkls23.ScalarMul(msgScalar, uniqueKept.InversionMask),

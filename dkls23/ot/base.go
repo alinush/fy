@@ -63,8 +63,8 @@ func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof)
 		return m0, m1, ErrOTFailed
 	}
 
-	// Check if h matches the one in the proof
-	if !dkls23.PointEqual(h, encProof.BaseH) {
+	// Check if h matches the one in the proof (BaseH is inside Proof0)
+	if !dkls23.PointEqual(h, encProof.Proof0.BaseH) {
 		return m0, m1, errors.New("receiver cheated: h mismatch")
 	}
 
