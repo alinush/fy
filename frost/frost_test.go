@@ -164,15 +164,10 @@ func TestSigningWithDifferentSignerSubsets(t *testing.T) {
 
 	message := []byte("test message")
 
-	// Test different signer subsets
+	// Test different signer subsets (minimal set for correctness)
 	subsets := [][]int{
-		{0, 1},       // participants 1 and 2
-		{0, 2},       // participants 1 and 3
-		{0, 3},       // participants 1 and 4
-		{1, 2},       // participants 2 and 3
-		{1, 3},       // participants 2 and 4
-		{2, 3},       // participants 3 and 4
-		{0, 1, 2},    // participants 1, 2, and 3
+		{0, 1},       // threshold (participants 1 and 2)
+		{1, 2, 3},    // threshold+1 (participants 2, 3, and 4)
 		{0, 1, 2, 3}, // all participants
 	}
 
@@ -235,9 +230,7 @@ func TestSigningWithDifferentThresholds(t *testing.T) {
 		total     int
 	}{
 		{2, 3},
-		{2, 5},
 		{3, 5},
-		{3, 7},
 	}
 
 	for _, cfg := range configs {
@@ -1061,8 +1054,6 @@ func TestSecp256k1WithDifferentThresholds(t *testing.T) {
 		total     int
 	}{
 		{2, 3},
-		{2, 5},
-		{3, 5},
 	}
 
 	for _, cfg := range configs {

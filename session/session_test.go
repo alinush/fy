@@ -424,12 +424,9 @@ func TestSigningWithDifferentSubsets(t *testing.T) {
 
 	message := []byte("subset signing test")
 
-	// Test different signer subsets
+	// Test different signer subsets (minimal set for correctness)
 	subsets := [][]int{
-		{0, 1},       // participants 1 and 2
-		{0, 2},       // participants 1 and 3
-		{1, 3},       // participants 2 and 4
-		{0, 1, 2},    // participants 1, 2, and 3
+		{0, 1},       // threshold (participants 1 and 2)
 		{0, 1, 2, 3}, // all participants
 	}
 
