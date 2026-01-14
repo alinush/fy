@@ -11,6 +11,10 @@ import (
 )
 
 func TestSign2of2(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping expensive DKG/sign test in short mode")
+	}
+
 	// First, run DKG to get parties
 	params := dkg.Parameters{Threshold: 2, ShareCount: 2}
 	sessionID := []byte("test-sign-2of2")

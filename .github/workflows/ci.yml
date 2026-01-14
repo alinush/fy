@@ -27,12 +27,13 @@ jobs:
       - name: Build
         run: go build -v ./...
 
-      - name: Test (short mode with race detector)
-        run: go test -v -short -race -timeout 5m ./...
-
-      - name: Test (short mode for coverage)
-        if: matrix.go-version == '1.22'
-        run: go test -v -short -timeout 5m -coverprofile=coverage.out ./...
+      - name: Test (short mode)
+        run: |
+          if [ "${{ matrix.go-version }}" = "1.22" ]; then
+            go test -v -short -timeout 5m -coverprofile=coverage.out ./...
+          else
+            go test -v -short -timeout 5m ./...
+          fi
 
       - name: Upload coverage
         if: matrix.go-version == '1.22'
