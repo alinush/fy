@@ -208,13 +208,21 @@ signID := []byte("sign-session-1")
 sess1, _ := session.NewDKLS23SigningSession(party1, messageHash, signID, []uint8{2})
 sess2, _ := session.NewDKLS23SigningSession(party2, messageHash, signID, []uint8{1})
 
-// Phase 1-4: Exchange messages between parties
-p1_1, _ := sess1.Phase1()
-p1_2, _ := sess2.Phase1()
-// ... exchange and continue through Phase4 ...
+// Phase 1: Generate and exchange
+out1_1, _ := sess1.Phase1()
+out1_2, _ := sess2.Phase1()
 
-// Final signature (Bitcoin/Ethereum compatible)
-sig, _ := sess1.Phase4(allBroadcasts, true) // true = normalize S
+// Phase 2: Exchange Phase1 outputs
+out2_1, _ := sess1.Phase2(map[uint8]*sign.Phase1ToPhase2Transmit{2: out1_2.ToTransmit[2]})
+out2_2, _ := sess2.Phase2(map[uint8]*sign.Phase1ToPhase2Transmit{1: out1_1.ToTransmit[1]})
+
+// Phase 3: Exchange Phase2 outputs
+out3_1, _ := sess1.Phase3(map[uint8]*sign.Phase2ToPhase3Transmit{2: out2_2.ToTransmit[2]})
+out3_2, _ := sess2.Phase3(map[uint8]*sign.Phase2ToPhase3Transmit{1: out2_1.ToTransmit[1]})
+
+// Phase 4: Aggregate broadcasts into final signature
+allBroadcasts := []*sign.Phase3Broadcast{out3_1.Broadcast, out3_2.Broadcast}
+sig, _ := sess1.Phase4(allBroadcasts, true) // true = normalize S for Bitcoin/Ethereum
 // sig.R, sig.S, sig.RecoveryID
 ```
 
