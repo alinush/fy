@@ -9,6 +9,10 @@ import (
 )
 
 func TestDKGAndSign(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 3
@@ -122,6 +126,10 @@ func TestDKGAndSign(t *testing.T) {
 }
 
 func TestNonceReusePrevention(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 3
@@ -244,6 +252,10 @@ func TestParticipantIDValidation(t *testing.T) {
 }
 
 func TestQuickSign(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 3
@@ -300,6 +312,10 @@ func TestQuickSign(t *testing.T) {
 }
 
 func TestSetKeyShare(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 3
@@ -381,6 +397,10 @@ func TestAggregateValidation(t *testing.T) {
 }
 
 func TestSigningWithDifferentSubsets(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 4
@@ -466,6 +486,10 @@ func TestSigningWithDifferentSubsets(t *testing.T) {
 }
 
 func TestMissingOwnCommitment(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping DKG test in short mode")
+	}
+
 	g := &bjj.BJJ{}
 	threshold := 2
 	total := 3
