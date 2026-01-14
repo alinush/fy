@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"math/big"
-	"os"
 	"testing"
 
 	"github.com/f3rmion/fy/bjj"
@@ -157,21 +156,10 @@ func TestGenerateInteropVectors(t *testing.T) {
 		})
 	})
 
-	// Output vectors as JSON
+	// Output vectors as JSON (for debugging only, not written to file)
 	output, err := json.MarshalIndent(vectors, "", "  ")
 	if err != nil {
 		t.Fatalf("JSON marshal error: %v", err)
-	}
-
-	// Write to file
-	err = os.WriteFile("testdata/interop_vectors.json", output, 0644)
-	if err != nil {
-		// Create testdata directory if it doesn't exist
-		os.MkdirAll("testdata", 0755)
-		err = os.WriteFile("testdata/interop_vectors.json", output, 0644)
-		if err != nil {
-			t.Logf("Could not write file: %v", err)
-		}
 	}
 
 	t.Logf("Generated %d test vectors", len(vectors))

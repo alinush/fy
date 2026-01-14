@@ -121,6 +121,37 @@ sig, _ := f.Aggregate(message, commitments, sigShares)
 valid := f.Verify(message, sig, groupKey)
 ```
 
+### Using the Session API (Recommended)
+
+The `session` package provides a simpler interface with built-in nonce safety:
+
+```go
+import "github.com/f3rmion/fy/session"
+
+// Create participants
+p1, _ := session.NewParticipant(g, 2, 3, 1)
+p2, _ := session.NewParticipant(g, 2, 3, 2)
+p3, _ := session.NewParticipant(g, 2, 3, 3)
+
+// DKG Round 1
+r1_1, _ := p1.GenerateRound1(rand.Reader, []int{1, 2, 3})
+r1_2, _ := p2.GenerateRound1(rand.Reader, []int{1, 2, 3})
+r1_3, _ := p3.GenerateRound1(rand.Reader, []int{1, 2, 3})
+// Exchange broadcasts and private shares...
+
+// Finalize DKG
+result1, _ := p1.ProcessRound1(&session.Round1Input{...})
+// result1.KeyShare, result1.GroupKey
+
+// Signing with session (prevents nonce reuse)
+sess, _ := p1.NewSigningSession(rand.Reader, message)
+// sess.Commitment() - broadcast to other signers
+share, _ := sess.Sign(allCommitments) // session consumed after this
+
+// Aggregate
+sig, _ := session.Aggregate(f, message, allCommitments, allShares)
+```
+
 
 ## DKLs23 (Threshold ECDSA)
 
@@ -128,50 +159,72 @@ DKLs23 is a Paillier-free threshold ECDSA protocol based on [eprint.iacr.org/202
 
 Use this for ECDSA signatures on secp256k1 (Bitcoin/Ethereum compatible).
 
-### Distributed Key Generation
+### Using the Session API (Recommended)
+
+The `session` package provides a high-level API that handles protocol phases:
 
 ```go
 package main
 
 import (
-    "crypto/rand"
-    "github.com/f3rmion/fy/dkls23/dkg"
-    "github.com/f3rmion/fy/secp256k1"
+    "github.com/f3rmion/fy/session"
+    "github.com/f3rmion/fy/dkls23/sign"
 )
 
 func main() {
-    g := &secp256k1.Secp256k1{}
+    threshold := uint8(2)
+    total := uint8(3)
+    sessionID := []byte("unique-session-id")
 
-    // Create DKG instances for each participant
-    alice, _ := dkg.NewProtocol(g, rand.Reader, 1, 2)
-    bob, _ := dkg.NewProtocol(g, rand.Reader, 2, 2)
+    // Each participant creates their state
+    p1, _ := session.NewDKLS23Participant(threshold, total, 1, sessionID)
+    p2, _ := session.NewDKLS23Participant(threshold, total, 2, sessionID)
+    p3, _ := session.NewDKLS23Participant(threshold, total, 3, sessionID)
 
-    // Run the DKG protocol (exchange messages between parties)
-    // ... protocol rounds ...
+    // Phase 1: Generate polynomials
+    out1_1, _ := p1.DKGPhase1()
+    out1_2, _ := p2.DKGPhase1()
+    out1_3, _ := p3.DKGPhase1()
+    // Exchange PolyPoints between participants...
 
-    // Each party obtains their key share
-    aliceShare := alice.KeyShare()
-    bobShare := bob.KeyShare()
+    // Phase 2: Generate commitments and zero seeds
+    // Phase 3: Reveal seeds and init multiplication
+    // Phase 4: Finalize - each participant now has a signing Party
 
-    // Both shares yield the same public key
-    publicKey := aliceShare.PublicKey
+    party1 := p1.Party()
+    party2 := p2.Party()
+    // party1.PublicKey == party2.PublicKey (same ECDSA public key)
 }
 ```
 
 ### Threshold Signing
 
 ```go
-import "github.com/f3rmion/fy/dkls23/sign"
+// Create signing sessions for 2-of-3 signing
+messageHash := session.DKLS23MessageHash([]byte("hello ECDSA"))
+signID := []byte("sign-session-1")
 
-// Create signing sessions
-aliceSigner, _ := sign.NewProtocol(g, rand.Reader, aliceShare, message)
-bobSigner, _ := sign.NewProtocol(g, rand.Reader, bobShare, message)
+// Party 1 and Party 2 will sign (threshold = 2)
+sess1, _ := session.NewDKLS23SigningSession(party1, messageHash, signID, []uint8{2})
+sess2, _ := session.NewDKLS23SigningSession(party2, messageHash, signID, []uint8{1})
 
-// Run the signing protocol (exchange messages between parties)
-// ... protocol rounds ...
+// Phase 1-4: Exchange messages between parties
+p1_1, _ := sess1.Phase1()
+p1_2, _ := sess2.Phase1()
+// ... exchange and continue through Phase4 ...
 
-// Obtain the final ECDSA signature
-r, s := aliceSigner.Signature()
+// Final signature (Bitcoin/Ethereum compatible)
+sig, _ := sess1.Phase4(allBroadcasts, true) // true = normalize S
+// sig.R, sig.S, sig.RecoveryID
+```
+
+### Quick Sign (Testing)
+
+For local testing with all parties in one process:
+
+```go
+parties := []*sign.Party{party1, party2} // threshold parties
+sig, _ := session.DKLS23QuickSign(parties, messageHash, signID, true)
 ```
 
 
