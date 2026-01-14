@@ -2,6 +2,7 @@ package frost
 
 import (
 	"crypto/sha256"
+	"fmt"
 	"math/big"
 
 	"github.com/f3rmion/fy/group"
@@ -378,14 +379,33 @@ func (h *RailgunHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	// So A = Y / 8
 	ax, ay := h.extractPkCoordinatesDiv8(g, Y)
 
-	// Message should be a 32-byte field element
+	// Message should be a 32-byte field element, reduced modulo BN254 scalar field
 	msgInt := new(big.Int).SetBytes(msg)
+	msgInt.Mod(msgInt, bn254ScalarFieldOrder)
+
+	// Reduce all coordinates modulo BN254 scalar field for Poseidon compatibility
+	// BJJ coordinates may exceed BN254 scalar field order
+	rx.Mod(rx, bn254ScalarFieldOrder)
+	ry.Mod(ry, bn254ScalarFieldOrder)
+	ax.Mod(ax, bn254ScalarFieldOrder)
+	ay.Mod(ay, bn254ScalarFieldOrder)
+
+	// Debug: Print H2 inputs
+	fmt.Printf("\n=== RailgunHasher.H2 Debug ===\n")
+	fmt.Printf("R.x: %s\n", rx.String())
+	fmt.Printf("R.y: %s\n", ry.String())
+	fmt.Printf("A.x: %s\n", ax.String())
+	fmt.Printf("A.y: %s\n", ay.String())
+	fmt.Printf("msg: %s\n", msgInt.String())
 
 	// Compute challenge exactly as circomlibjs: poseidon([R.x, R.y, A.x, A.y, msg])
 	hash, err := poseidon.Hash([]*big.Int{rx, ry, ax, ay, msgInt})
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
+
+	fmt.Printf("challenge c: %s\n", hash.String())
+	fmt.Printf("==============================\n")
 
 	return poseidonToScalar(g, hash)
 }
@@ -483,6 +503,7 @@ func (h *RailgunHasher) circomScalarMult(px, py, s *big.Int) (*big.Int, *big.Int
 
 // extractPointCoordinates extracts (X, Y) coordinates from point bytes.
 // Handles both compressed (32-byte) and uncompressed (64-byte) formats.
+// NOTE: Does NOT reduce coordinates - caller must reduce if needed for Poseidon.
 func (h *RailgunHasher) extractPointCoordinates(g group.Group, data []byte) (*big.Int, *big.Int) {
 	if len(data) == 64 {
 		// Uncompressed format: X || Y
