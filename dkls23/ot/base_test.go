@@ -7,6 +7,10 @@ import (
 )
 
 func TestDLogProof(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping OT test in short mode")
+	}
+
 	sessionID := []byte("test-session-dlog")
 
 	// Create a sender (which generates a DLogProof)
@@ -57,6 +61,10 @@ func TestEncProof(t *testing.T) {
 }
 
 func TestBaseOTFullProtocol(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping OT test in short mode")
+	}
+
 	sessionID := []byte("test-session-ot")
 
 	// Test for both choice bits
@@ -117,6 +125,10 @@ func TestBaseOTFullProtocol(t *testing.T) {
 }
 
 func TestBaseOTBatch(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping OT test in short mode")
+	}
+
 	sessionID := []byte("test-session-ot-batch")
 
 	// Create a batch of choice bits
