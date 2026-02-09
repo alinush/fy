@@ -2,13 +2,23 @@ package frost
 
 import (
 	"crypto/sha256"
-	"fmt"
+	"encoding/binary"
+	"hash"
 	"math/big"
 
 	"github.com/f3rmion/fy/group"
 	"github.com/iden3/go-iden3-crypto/poseidon"
 	"golang.org/x/crypto/blake2b"
 )
+
+// writeLengthPrefixed writes a 4-byte big-endian length prefix followed by the data.
+// This prevents hash collision attacks from ambiguous concatenation boundaries.
+func writeLengthPrefixed(h hash.Hash, data []byte) {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+	h.Write(lenBuf[:])
+	h.Write(data)
+}
 
 // Hasher defines the hash operations required by FROST.
 // Different implementations can provide different hash functions
@@ -40,15 +50,43 @@ type SHA256Hasher struct{}
 func (h *SHA256Hasher) hash(data ...[]byte) []byte {
 	hasher := sha256.New()
 	for _, d := range data {
-		hasher.Write(d)
+		writeLengthPrefixed(hasher, d)
 	}
 	return hasher.Sum(nil)
 }
 
 func (h *SHA256Hasher) hashToScalar(g group.Group, data ...[]byte) group.Scalar {
-	hash := h.hash(data...)
+	// Use hash-to-field: expand to 64 bytes for uniform reduction (bias < 2^-128).
+	// Hash with counter 0x00 and 0x01 to get 64 bytes total.
+	// Copy the slice before appending to avoid aliasing the variadic backing array.
+	d0 := make([][]byte, len(data)+1)
+	copy(d0, data)
+	d0[len(data)] = []byte{0x00}
+	h1 := h.hash(d0...)
+
+	d1 := make([][]byte, len(data)+1)
+	copy(d1, data)
+	d1[len(data)] = []byte{0x01}
+	h2 := h.hash(d1...)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], h1)
+	copy(expanded[32:], h2)
+
+	// Reduce via big.Int to handle groups where SetBytes truncates (e.g., secp256k1).
+	n := new(big.Int).SetBytes(expanded)
+	order := new(big.Int).SetBytes(g.Order())
+	n.Mod(n, order)
+
 	s := g.NewScalar()
-	s.SetBytes(hash)
+	nBytes := n.Bytes()
+	var buf [32]byte
+	copy(buf[32-len(nBytes):], nBytes)
+	if _, err := s.SetBytes(buf[:]); err != nil {
+		// This should never happen since we pre-reduced via big.Int,
+		// but handle defensively.
+		panic("hashToScalar: SetBytes failed after reduction: " + err.Error())
+	}
 	return s
 }
 
@@ -97,10 +135,10 @@ func NewBlake2bHasher() *Blake2bHasher {
 
 func (h *Blake2bHasher) hash(tag string, data ...[]byte) []byte {
 	hasher, _ := blake2b.New512(nil)
-	hasher.Write([]byte(h.Prefix))
-	hasher.Write([]byte(tag))
+	writeLengthPrefixed(hasher, []byte(h.Prefix))
+	writeLengthPrefixed(hasher, []byte(tag))
 	for _, d := range data {
-		hasher.Write(d)
+		writeLengthPrefixed(hasher, d)
 	}
 	return hasher.Sum(nil)
 }
@@ -116,8 +154,20 @@ func (h *Blake2bHasher) hashToScalar(g group.Group, tag string, data ...[]byte) 
 		reversed[i] = hash[len(hash)-1-i]
 	}
 
+	// Reduce via big.Int to handle groups where SetBytes truncates (e.g., secp256k1).
+	n := new(big.Int).SetBytes(reversed)
+	order := new(big.Int).SetBytes(g.Order())
+	n.Mod(n, order)
+
 	s := g.NewScalar()
-	s.SetBytes(reversed)
+	nBytes := n.Bytes()
+	var buf [32]byte
+	copy(buf[32-len(nBytes):], nBytes)
+	if _, err := s.SetBytes(buf[:]); err != nil {
+		// This should never happen since we pre-reduced via big.Int,
+		// but handle defensively.
+		panic("hashToScalar: SetBytes failed after reduction: " + err.Error())
+	}
 	return s
 }
 
@@ -390,22 +440,11 @@ func (h *RailgunHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	ax.Mod(ax, bn254ScalarFieldOrder)
 	ay.Mod(ay, bn254ScalarFieldOrder)
 
-	// Debug: Print H2 inputs
-	fmt.Printf("\n=== RailgunHasher.H2 Debug ===\n")
-	fmt.Printf("R.x: %s\n", rx.String())
-	fmt.Printf("R.y: %s\n", ry.String())
-	fmt.Printf("A.x: %s\n", ax.String())
-	fmt.Printf("A.y: %s\n", ay.String())
-	fmt.Printf("msg: %s\n", msgInt.String())
-
 	// Compute challenge exactly as circomlibjs: poseidon([R.x, R.y, A.x, A.y, msg])
 	hash, err := poseidon.Hash([]*big.Int{rx, ry, ax, ay, msgInt})
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
-
-	fmt.Printf("challenge c: %s\n", hash.String())
-	fmt.Printf("==============================\n")
 
 	return poseidonToScalar(g, hash)
 }
@@ -484,21 +523,29 @@ func (h *RailgunHasher) circomScalarMult(px, py, s *big.Int) (*big.Int, *big.Int
 		return x3, y3
 	}
 
-	// Double-and-add scalar multiplication
-	// Start with identity (0, 1)
-	rx, ry := big.NewInt(0), big.NewInt(1)
-	tempX, tempY := new(big.Int).Set(px), new(big.Int).Set(py)
+	// Montgomery ladder scalar multiplication with fixed iteration count.
+	// Provides structural constant-time (same operations per iteration) but NOT
+	// microarchitectural constant-time due to math/big. This is acceptable here
+	// because the scalar inv8 is a public constant, not a secret value.
+	// R0 = identity (0, 1), R1 = P
+	r0x, r0y := big.NewInt(0), big.NewInt(1)
+	r1x, r1y := new(big.Int).Set(px), new(big.Int).Set(py)
+	// BJJ subgroup order (251 bits) - use fixed bit-width to prevent timing leaks
+	subOrder, _ := new(big.Int).SetString("2736030358979909402780800718157159386076813972158567259200215660948447373041", 10)
 	n := new(big.Int).Set(s)
+	fixedBits := subOrder.BitLen()
 
-	for n.Sign() > 0 {
-		if n.Bit(0) == 1 {
-			rx, ry = pointAdd(rx, ry, tempX, tempY)
+	for i := fixedBits - 1; i >= 0; i-- {
+		if n.Bit(i) == 0 {
+			r1x, r1y = pointAdd(r0x, r0y, r1x, r1y)
+			r0x, r0y = pointAdd(r0x, r0y, r0x, r0y)
+		} else {
+			r0x, r0y = pointAdd(r0x, r0y, r1x, r1y)
+			r1x, r1y = pointAdd(r1x, r1y, r1x, r1y)
 		}
-		tempX, tempY = pointAdd(tempX, tempY, tempX, tempY)
-		n.Rsh(n, 1)
 	}
 
-	return rx, ry
+	return r0x, r0y
 }
 
 // extractPointCoordinates extracts (X, Y) coordinates from point bytes.

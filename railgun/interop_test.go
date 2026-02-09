@@ -83,7 +83,10 @@ func TestGenerateInteropVectors(t *testing.T) {
 		}
 
 		// Get circomlibjs-compatible public key A = Y/8
-		gkX, gkY := shares[0].SpendingPublicKey()
+		gkX, gkY, err := shares[0].SpendingPublicKey()
+		if err != nil {
+			t.Fatalf("SpendingPublicKey() error = %v", err)
+		}
 
 		// Create message
 		msg, _ := poseidon.Hash([]*big.Int{big.NewInt(42), big.NewInt(123)})
@@ -120,7 +123,10 @@ func TestGenerateInteropVectors(t *testing.T) {
 		}
 
 		// Get circomlibjs-compatible public key A = Y/8
-		gkX, gkY := shares[0].SpendingPublicKey()
+		gkX, gkY, err := shares[0].SpendingPublicKey()
+		if err != nil {
+			t.Fatalf("SpendingPublicKey() error = %v", err)
+		}
 		// Also get the internal group key for local verification
 		groupKey := shares[0].SpendingKeyShare.GroupKey
 

@@ -86,13 +86,19 @@ func TestOTExtensionFullProtocol(t *testing.T) {
 
 	// Create choice bits (BatchSize bits)
 	choiceBits := make([]bool, BatchSize)
-	randBytes, _ := dkls23.RandBytes(BatchSize / 8)
+	randBytes, err := dkls23.RandBytes(BatchSize / 8)
+	if err != nil {
+		t.Fatalf("RandBytes failed: %v", err)
+	}
 	for i := 0; i < BatchSize; i++ {
 		choiceBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
 
 	// Run receiver phase 1
-	extendedSeeds, dataToSender := extReceiver.RunPhase1(sessionID, choiceBits)
+	extendedSeeds, dataToSender, err := extReceiver.RunPhase1(sessionID, choiceBits)
+	if err != nil {
+		t.Fatalf("ExtReceiver.RunPhase1 failed: %v", err)
+	}
 	if len(extendedSeeds) != Kappa {
 		t.Errorf("Expected %d extended seeds, got %d", Kappa, len(extendedSeeds))
 	}
@@ -106,7 +112,11 @@ func TestOTExtensionFullProtocol(t *testing.T) {
 	for i := uint8(0); i < otWidth; i++ {
 		inputCorrelations[i] = make([]group.Scalar, BatchSize)
 		for j := 0; j < BatchSize; j++ {
-			inputCorrelations[i][j], _ = dkls23.RandomScalar()
+			var err error
+			inputCorrelations[i][j], err = dkls23.RandomScalar()
+			if err != nil {
+				t.Fatalf("RandomScalar failed: %v", err)
+			}
 		}
 	}
 

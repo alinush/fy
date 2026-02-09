@@ -153,8 +153,15 @@ func (s *Sender) Run(
 	aTilde := make([]group.Scalar, L)
 	aHat := make([]group.Scalar, L)
 	for i := 0; i < L; i++ {
-		aTilde[i], _ = dkls23.RandomScalar()
-		aHat[i], _ = dkls23.RandomScalar()
+		var err error
+		aTilde[i], err = dkls23.RandomScalar()
+		if err != nil {
+			return nil, nil, err
+		}
+		aHat[i], err = dkls23.RandomScalar()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
 	// Create correlations: L copies of a_tilde, then L copies of a_hat
@@ -240,11 +247,14 @@ func (s *Sender) Run(
 }
 
 // RunPhase1 runs the first phase of the receiver's protocol
-// Returns: random factor b, data to keep, and data for sender
-func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceiver, *ot.DataToSender) {
+// Returns: random factor b, data to keep, data for sender, and an error
+func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceiver, *ot.DataToSender, error) {
 	// Step 1: Sample choice bits and compute b
 	choiceBits := make([]bool, ot.BatchSize)
-	randBytes, _ := dkls23.RandBytes(ot.BatchSize / 8)
+	randBytes, err := dkls23.RandBytes(ot.BatchSize / 8)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	b := dkls23.NewScalar()
 	for i := 0; i < ot.BatchSize; i++ {
 		choiceBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
@@ -255,7 +265,10 @@ func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceive
 
 	// Step 3: Start OT extension
 	oteSID := append([]byte("OT Extension protocol"), sessionID...)
-	extendedSeeds, dataToSender := r.OTEReceiver.RunPhase1(oteSID, choiceBits)
+	extendedSeeds, dataToSender, err := r.OTEReceiver.RunPhase1(oteSID, choiceBits)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Step 4: Compute shared random values
 	transcript := buildTranscript(dataToSender)
@@ -276,7 +289,7 @@ func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceive
 		ChiHat:        chiHat,
 	}
 
-	return b, dataToKeep, dataToSender
+	return b, dataToKeep, dataToSender, nil
 }
 
 // RunPhase2 finishes the receiver's protocol

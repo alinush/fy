@@ -47,11 +47,18 @@ func TestMultiplication(t *testing.T) {
 	// Sample sender's input
 	senderInput := make([]group.Scalar, L)
 	for i := 0; i < L; i++ {
-		senderInput[i], _ = dkls23.RandomScalar()
+		var err error
+		senderInput[i], err = dkls23.RandomScalar()
+		if err != nil {
+			t.Fatalf("RandomScalar failed: %v", err)
+		}
 	}
 
 	// Phase 1 - Receiver (starts the protocol)
-	receiverRandom, dataToKeep, dataToSender := mulReceiver.RunPhase1(sessionID)
+	receiverRandom, dataToKeep, dataToSender, err := mulReceiver.RunPhase1(sessionID)
+	if err != nil {
+		t.Fatalf("Receiver.RunPhase1 failed: %v", err)
+	}
 
 	// Communication round 1: Receiver sends dataToSender
 

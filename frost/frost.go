@@ -1,6 +1,7 @@
 package frost
 
 import (
+	"encoding/binary"
 	"errors"
 
 	"github.com/f3rmion/fy/group"
@@ -85,12 +86,20 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 	}, nil
 }
 
-// scalarFromInt creates a scalar from an integer value.
+// scalarFromInt creates a scalar from a non-negative integer value.
+// Supports values up to 2^32-1 (encoded as big-endian in a 32-byte buffer).
+// Panics if n is negative (programmer error).
 func (f *FROST) scalarFromInt(n int) group.Scalar {
+	if n < 0 {
+		panic("scalarFromInt: negative value")
+	}
 	s := f.group.NewScalar()
 	buf := make([]byte, 32)
-	buf[31] = byte(n) // big-endian: value goes at the end
-	s.SetBytes(buf)
+	binary.BigEndian.PutUint32(buf[28:], uint32(n))
+	// Values in [0, 2^32-1] are always within group order; panic indicates a bug.
+	if _, err := s.SetBytes(buf); err != nil {
+		panic("scalarFromInt: SetBytes failed for small integer: " + err.Error())
+	}
 	return s
 }
 

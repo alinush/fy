@@ -45,7 +45,10 @@ func TestEncProof(t *testing.T) {
 	}
 
 	// Test with choice bit = false
-	_, proof0 := receiver.Phase1(sessionID, false)
+	_, proof0, err := receiver.Phase1(sessionID, false)
+	if err != nil {
+		t.Fatalf("Phase1 bit=false failed: %v", err)
+	}
 
 	sid := append(sessionID, []byte("EncProof")...)
 	if !proof0.Verify(sid) {
@@ -53,7 +56,10 @@ func TestEncProof(t *testing.T) {
 	}
 
 	// Test with choice bit = true
-	_, proof1 := receiver.Phase1(sessionID, true)
+	_, proof1, err := receiver.Phase1(sessionID, true)
+	if err != nil {
+		t.Fatalf("Phase1 bit=true failed: %v", err)
+	}
 
 	if !proof1.Verify(sid) {
 		t.Error("EncProof verification failed for bit=true")
@@ -82,7 +88,10 @@ func TestBaseOTFullProtocol(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewReceiver failed: %v", err)
 			}
-			rScalar, encProof := receiver.Phase1(sessionID, choiceBit)
+			rScalar, encProof, err := receiver.Phase1(sessionID, choiceBit)
+			if err != nil {
+				t.Fatalf("Phase1 failed: %v", err)
+			}
 
 			// Receiver Phase 2 Step 1: Verify sender's proof
 			z, err := receiver.Phase2Step1(sessionID, dlogProof)
@@ -147,7 +156,10 @@ func TestBaseOTBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewReceiver failed: %v", err)
 	}
-	vecR, vecProof := receiver.Phase1Batch(sessionID, bits)
+	vecR, vecProof, err := receiver.Phase1Batch(sessionID, bits)
+	if err != nil {
+		t.Fatalf("Phase1Batch failed: %v", err)
+	}
 
 	// Sender Phase 2 Batch
 	vecM0, vecM1, err := sender.Phase2Batch(sessionID, receiver.GetSeed(), vecProof)

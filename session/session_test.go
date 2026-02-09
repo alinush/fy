@@ -169,30 +169,33 @@ func TestNonceReusePrevention(t *testing.T) {
 		})
 	}
 
-	// Create a signing session
+	// Create signing sessions for two participants (threshold=2)
 	message := []byte("test nonce reuse")
-	sess, err := participants[0].NewSigningSession(rand.Reader, message)
+	sess0, err := participants[0].NewSigningSession(rand.Reader, message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess1, err := participants[1].NewSigningSession(rand.Reader, message)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	commitment := sess.Commitment()
-	commitments := []*frost.SigningCommitment{commitment}
+	commitments := []*frost.SigningCommitment{sess0.Commitment(), sess1.Commitment()}
 
 	// First sign should succeed
-	_, err = sess.Sign(commitments)
+	_, err = sess0.Sign(commitments)
 	if err != nil {
 		t.Fatalf("first sign failed: %v", err)
 	}
 
 	// Second sign should fail (nonce reuse prevention)
-	_, err = sess.Sign(commitments)
+	_, err = sess0.Sign(commitments)
 	if err == nil {
 		t.Error("second sign should fail to prevent nonce reuse")
 	}
 
 	// IsConsumed should return true
-	if !sess.IsConsumed() {
+	if !sess0.IsConsumed() {
 		t.Error("session should be marked as consumed")
 	}
 }

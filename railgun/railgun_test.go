@@ -55,7 +55,11 @@ func TestGenerateShares(t *testing.T) {
 	// Verify all shares have the same group key
 	var groupKey *big.Int
 	for i, share := range shares {
-		x, y := share.SpendingPublicKey()
+		x, y, err := share.SpendingPublicKey()
+		if err != nil {
+			t.Errorf("Share %d: SpendingPublicKey() error = %v", i, err)
+			continue
+		}
 		if x == nil || y == nil {
 			t.Errorf("Share %d has nil public key coordinates", i)
 			continue
@@ -562,7 +566,10 @@ func TestCombinedDKGProducesDifferentKeys(t *testing.T) {
 
 	// Shield (secp256k1) and spending (BJJ) keys should be different
 	shieldKey := shares[0].ShieldPublicKey()
-	spendingX, spendingY := shares[0].SpendingPublicKey()
+	spendingX, spendingY, err := shares[0].SpendingPublicKey()
+	if err != nil {
+		t.Fatalf("SpendingPublicKey() error = %v", err)
+	}
 
 	// Convert spending key to bytes for comparison
 	spendingKeyBytes := append(spendingX.Bytes(), spendingY.Bytes()...)
@@ -601,7 +608,10 @@ func TestShieldPublicKeyFormats(t *testing.T) {
 	}
 
 	// Test uncompressed format
-	uncompressed := shares[0].ShieldPublicKeyUncompressed()
+	uncompressed, err := shares[0].ShieldPublicKeyUncompressed()
+	if err != nil {
+		t.Fatalf("ShieldPublicKeyUncompressed() error = %v", err)
+	}
 	if len(uncompressed) != 65 {
 		t.Errorf("Uncompressed shield public key should be 65 bytes, got %d", len(uncompressed))
 	}

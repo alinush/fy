@@ -2,7 +2,9 @@ package bjj
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 
@@ -47,39 +49,61 @@ func (s *CircomScalar) reduce() {
 	s.inner.Mod(s.inner, circSubOrder)
 }
 
+// assertCircomScalar asserts that s is a *CircomScalar.
+// Panics with a descriptive message if s is a different group.Scalar implementation.
+// This is by design: mixing scalar types from different groups is a programming error.
+func assertCircomScalar(s group.Scalar) *CircomScalar {
+	v, ok := s.(*CircomScalar)
+	if !ok {
+		panic(fmt.Sprintf("circombjj: expected *bjj.CircomScalar, got %T (do not mix group implementations)", s))
+	}
+	return v
+}
+
+// assertCircomPoint asserts that p is a *CircomPoint.
+// Panics with a descriptive message if p is a different group.Point implementation.
+// This is by design: mixing point types from different groups is a programming error.
+func assertCircomPoint(p group.Point) *CircomPoint {
+	v, ok := p.(*CircomPoint)
+	if !ok {
+		panic(fmt.Sprintf("circombjj: expected *bjj.CircomPoint, got %T (do not mix group implementations)", p))
+	}
+	return v
+}
+
 func (s *CircomScalar) Add(a, b group.Scalar) group.Scalar {
-	as := a.(*CircomScalar)
-	bs := b.(*CircomScalar)
+	as := assertCircomScalar(a)
+	bs := assertCircomScalar(b)
 	s.inner.Add(as.inner, bs.inner)
 	s.reduce()
 	return s
 }
 
 func (s *CircomScalar) Sub(a, b group.Scalar) group.Scalar {
-	as := a.(*CircomScalar)
-	bs := b.(*CircomScalar)
+	as := assertCircomScalar(a)
+	bs := assertCircomScalar(b)
 	s.inner.Sub(as.inner, bs.inner)
 	s.reduce()
 	return s
 }
 
 func (s *CircomScalar) Mul(a, b group.Scalar) group.Scalar {
-	as := a.(*CircomScalar)
-	bs := b.(*CircomScalar)
+	as := assertCircomScalar(a)
+	bs := assertCircomScalar(b)
 	s.inner.Mul(as.inner, bs.inner)
 	s.reduce()
 	return s
 }
 
 func (s *CircomScalar) Negate(a group.Scalar) group.Scalar {
-	as := a.(*CircomScalar)
+	as := assertCircomScalar(a)
 	s.inner.Neg(as.inner)
 	s.reduce()
 	return s
 }
 
 func (s *CircomScalar) Invert(a group.Scalar) (group.Scalar, error) {
-	as := a.(*CircomScalar)
+	as := assertCircomScalar(a)
 	if as.inner.Sign() == 0 {
 		return nil, errors.New("cannot invert zero scalar")
 	}
@@ -88,12 +112,14 @@ func (s *CircomScalar) Invert(a group.Scalar) (group.Scalar, error) {
 }
 
 func (s *CircomScalar) Set(a group.Scalar) group.Scalar {
-	as := a.(*CircomScalar)
+	as := assertCircomScalar(a)
 	s.inner.Set(as.inner)
 	return s
 }
 
 func (s *CircomScalar) Bytes() []byte {
+	// Ensure scalar is reduced before serialization
+	s.reduce()
 	bytes := s.inner.Bytes()
 	if len(bytes) >= 32 {
 		return bytes[:32]
@@ -104,13 +130,16 @@ func (s *CircomScalar) Bytes() []byte {
 }
 
 func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
+	if len(data) > 64 {
+		return nil, errors.New("scalar input exceeds 64 bytes")
+	}
 	s.inner.SetBytes(data)
 	s.reduce()
 	return s, nil
 }
 
 func (s *CircomScalar) Equal(b group.Scalar) bool {
-	bs := b.(*CircomScalar)
+	bs := assertCircomScalar(b)
 	return s.inner.Cmp(bs.inner) == 0
 }
 
@@ -148,8 +177,16 @@ func fieldMul(a, b *big.Int) *big.Int {
 	return result.Mod(result, fieldP)
 }
 
-// fieldInv computes a^(-1) mod p
+// fieldInv computes a^(-1) mod p.
+// Panics if a is zero. In the twisted Edwards addition formula, the denominators
+// (1 + d*x1*x2*y1*y2) and (1 - d*x1*x2*y1*y2) are guaranteed non-zero for
+// valid curve points when a*d is not a square in the field, which holds for
+// the Baby JubJub parameters (a=168700, d=168696). A zero input here would
+// indicate a bug in the caller, not a runtime condition.
 func fieldInv(a *big.Int) *big.Int {
+	if a.Sign() == 0 {
+		panic("fieldInv: cannot invert zero")
+	}
 	return new(big.Int).ModInverse(a, fieldP)
 }
 
@@ -158,8 +195,8 @@ func fieldInv(a *big.Int) *big.Int {
 // x3 = (x1*y2 + y1*x2) / (1 + d*x1*x2*y1*y2)
 // y3 = (y1*y2 - a*x1*x2) / (1 - d*x1*x2*y1*y2)
 func (p *CircomPoint) Add(a, b group.Point) group.Point {
-	ap := a.(*CircomPoint)
-	bp := b.(*CircomPoint)
+	ap := assertCircomPoint(a)
+	bp := assertCircomPoint(b)
 
 	x1, y1 := ap.x, ap.y
 	x2, y2 := bp.x, bp.y
@@ -194,7 +231,7 @@ func (p *CircomPoint) Add(a, b group.Point) group.Point {
 }
 
 func (p *CircomPoint) Sub(a, b group.Point) group.Point {
-	bp := b.(*CircomPoint)
+	bp := assertCircomPoint(b)
 	negB := newCircomPoint()
 	negB.x = new(big.Int).Neg(bp.x)
 	negB.x.Mod(negB.x, fieldP)
@@ -203,45 +240,58 @@ func (p *CircomPoint) Sub(a, b group.Point) group.Point {
 }
 
 func (p *CircomPoint) Negate(a group.Point) group.Point {
-	ap := a.(*CircomPoint)
+	ap := assertCircomPoint(a)
 	p.x = new(big.Int).Neg(ap.x)
 	p.x.Mod(p.x, fieldP)
 	p.y = new(big.Int).Set(ap.y)
 	return p
 }
 
-// ScalarMult computes s * q using double-and-add.
+// ScalarMult computes s * q using a Montgomery ladder with fixed iteration count.
+// The loop always executes circSubOrder.BitLen() iterations (251 for BJJ) regardless
+// of the scalar value, preventing timing leaks from variable iteration count.
+//
+// NOTE: This provides structural constant-time (same operation count per iteration)
+// but NOT microarchitectural constant-time, because math/big operations have
+// data-dependent timing. For secret scalars requiring full constant-time guarantees,
+// use bjj.Point.ScalarMult (which delegates to gnark-crypto) instead.
 func (p *CircomPoint) ScalarMult(s group.Scalar, q group.Point) group.Point {
-	scalar := s.(*CircomScalar)
-	qp := q.(*CircomPoint)
+	scalar := assertCircomScalar(s)
+	qp := assertCircomPoint(q)
 
-	// Start with identity
-	result := newCircomPoint()
-	result.x = big.NewInt(0)
-	result.y = big.NewInt(1)
+	// Montgomery ladder: constant-time scalar multiplication
+	// R0 = identity, R1 = q
+	r0 := newCircomPoint()
+	r0.x = big.NewInt(0)
+	r0.y = big.NewInt(1)
 
-	// Copy q for doubling
-	temp := newCircomPoint()
-	temp.x = new(big.Int).Set(qp.x)
-	temp.y = new(big.Int).Set(qp.y)
+	r1 := newCircomPoint()
+	r1.x = new(big.Int).Set(qp.x)
+	r1.y = new(big.Int).Set(qp.y)
 
 	n := new(big.Int).Set(scalar.inner)
+	// Use fixed bit-width to prevent timing leaks from variable iteration count.
+	// circSubOrder.BitLen() is constant (251 bits for BJJ subgroup order).
+	fixedBits := circSubOrder.BitLen()
 
-	for n.Sign() > 0 {
-		if n.Bit(0) == 1 {
-			result.Add(result, temp)
+	// Process bits from most significant to least significant
+	for i := fixedBits - 1; i >= 0; i-- {
+		if n.Bit(i) == 0 {
+			r1.Add(r0, r1)
+			r0.Add(r0, r0)
+		} else {
+			r0.Add(r0, r1)
+			r1.Add(r1, r1)
 		}
-		temp.Add(temp, temp) // Double
-		n.Rsh(n, 1)
 	}
 
-	p.x = result.x
-	p.y = result.y
+	p.x = r0.x
+	p.y = r0.y
 	return p
 }
 
 func (p *CircomPoint) Set(a group.Point) group.Point {
-	ap := a.(*CircomPoint)
+	ap := assertCircomPoint(a)
 	p.x = new(big.Int).Set(ap.x)
 	p.y = new(big.Int).Set(ap.y)
 	return p
@@ -282,6 +332,10 @@ func (p *CircomPoint) SetUncompressedBytes(data []byte) (group.Point, error) {
 	if !p.isOnCurve() {
 		return nil, errors.New("point is not on curve")
 	}
+	// Verify point is in prime-order subgroup
+	if !p.IsInSubgroup() {
+		return nil, errors.New("point is not in the prime-order subgroup")
+	}
 	return p, nil
 }
 
@@ -299,12 +353,22 @@ func (p *CircomPoint) isOnCurve() bool {
 }
 
 func (p *CircomPoint) Equal(b group.Point) bool {
-	bp := b.(*CircomPoint)
+	bp := assertCircomPoint(b)
 	return p.x.Cmp(bp.x) == 0 && p.y.Cmp(bp.y) == 0
 }
 
 func (p *CircomPoint) IsIdentity() bool {
 	return p.x.Sign() == 0 && p.y.Cmp(big.NewInt(1)) == 0
+}
+
+// IsInSubgroup reports whether p is in the prime-order subgroup.
+// Checks order * P == identity.
+func (p *CircomPoint) IsInSubgroup() bool {
+	s := newCircomScalar()
+	s.inner = new(big.Int).Set(circSubOrder)
+	result := newCircomPoint()
+	result.ScalarMult(s, p)
+	return result.IsIdentity()
 }
 
 // DivBy8 computes P * inv(8, subOrder).
@@ -342,24 +406,40 @@ func (g *CircomBJJ) Generator() group.Point {
 
 func (g *CircomBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return nil, err
+	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// 1000 limit gives negligible false failure probability.
+	for attempt := 0; attempt < 1000; attempt++ {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, err
+		}
+		n := new(big.Int).SetBytes(buf[:])
+		if n.Cmp(circSubOrder) >= 0 || n.Sign() == 0 {
+			continue // reject and retry
+		}
+		return &CircomScalar{inner: n}, nil
 	}
-	s := newCircomScalar()
-	s.inner.SetBytes(buf[:])
-	s.reduce()
-	return s, nil
+	return nil, errors.New("RandomScalar: rejection sampling did not converge")
 }
 
 func (g *CircomBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
-	h := sha256.New()
-	for _, d := range data {
-		h.Write(d)
+	hashWith := func(counter byte) []byte {
+		h := sha256.New()
+		for _, d := range data {
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
+			h.Write(lenBuf[:])
+			h.Write(d)
+		}
+		h.Write([]byte{counter})
+		return h.Sum(nil)
 	}
-	hash := h.Sum(nil)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], hashWith(0x00))
+	copy(expanded[32:], hashWith(0x01))
 
 	s := newCircomScalar()
-	s.inner.SetBytes(hash)
+	s.inner.SetBytes(expanded)
 	s.reduce()
 	return s, nil
 }

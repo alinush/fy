@@ -1,6 +1,8 @@
 package frost
 
 import (
+	"encoding/binary"
+	"errors"
 	"io"
 
 	"github.com/f3rmion/fy/group"
@@ -86,6 +88,31 @@ func (f *FROST) SignRound2(
 	message []byte,
 	commitments []*SigningCommitment,
 ) (*SignatureShare, error) {
+	// Validate commitment list
+	if len(commitments) == 0 {
+		return nil, errors.New("empty commitment list")
+	}
+	if len(commitments) < f.threshold {
+		return nil, errors.New("not enough commitments to meet threshold")
+	}
+
+	// Check for duplicate signer IDs and verify own commitment is present
+	seen := make(map[string]bool)
+	ownFound := false
+	for _, c := range commitments {
+		key := string(c.ID.Bytes())
+		if seen[key] {
+			return nil, errors.New("duplicate signer ID in commitment list")
+		}
+		seen[key] = true
+		if c.ID.Equal(share.ID) {
+			ownFound = true
+		}
+	}
+	if !ownFound {
+		return nil, errors.New("own commitment not found in commitment list")
+	}
+
 	// Encode commitment list for binding factor computation
 	encCommitList := f.encodeCommitments(commitments)
 
@@ -105,7 +132,10 @@ func (f *FROST) SignRound2(
 	c := f.hasher.H2(f.group, R.Bytes(), share.GroupKey.Bytes(), message)
 
 	// Compute Lagrange coefficient for this signer
-	lambda := f.lagrangeCoefficient(share.ID, commitments)
+	lambda, err := f.lagrangeCoefficient(share.ID, commitments)
+	if err != nil {
+		return nil, err
+	}
 
 	// Compute signature share: z_i = d + rho * e + lambda * s * c
 	myRho := bindingFactors[string(share.ID.Bytes())]
@@ -158,6 +188,47 @@ func (f *FROST) ComputeGroupCommitment(message []byte, commitments []*SigningCom
 	return R, nil
 }
 
+// AggregateWithVerification combines individual signature shares into a complete
+// Schnorr signature, verifying each share before aggregation.
+// This prevents a single malicious signer from producing an invalid signature.
+//
+// The publicKeys map must contain the public key for each signer, keyed by
+// the string representation of their ID bytes.
+func (f *FROST) AggregateWithVerification(
+	message []byte,
+	commitments []*SigningCommitment,
+	shares []*SignatureShare,
+	publicKeys map[string]group.Point,
+	groupKey group.Point,
+) (*Signature, error) {
+	if len(shares) == 0 {
+		return nil, errors.New("no signature shares provided")
+	}
+	if len(commitments) == 0 {
+		return nil, errors.New("no commitments provided")
+	}
+	if len(shares) != len(commitments) {
+		return nil, errors.New("shares and commitments count mismatch")
+	}
+
+	// Verify each share before aggregation
+	for _, share := range shares {
+		pk, ok := publicKeys[string(share.ID.Bytes())]
+		if !ok {
+			return nil, errors.New("missing public key for signer")
+		}
+		valid, err := f.VerifyShare(share, pk, message, commitments, groupKey)
+		if err != nil {
+			return nil, err
+		}
+		if !valid {
+			return nil, errors.New("invalid signature share detected")
+		}
+	}
+
+	return f.Aggregate(message, commitments, shares)
+}
+
 // Aggregate combines individual signature shares into a complete Schnorr
 // signature. The resulting signature can be verified using [FROST.Verify].
 //
@@ -168,6 +239,13 @@ func (f *FROST) Aggregate(
 	commitments []*SigningCommitment,
 	shares []*SignatureShare,
 ) (*Signature, error) {
+	if len(shares) == 0 {
+		return nil, errors.New("no signature shares provided")
+	}
+	if len(commitments) == 0 {
+		return nil, errors.New("no commitments provided")
+	}
+
 	// Encode commitment list and recompute R
 	encCommitList := f.encodeCommitments(commitments)
 	bindingFactors := f.computeBindingFactors(message, encCommitList, commitments)
@@ -186,6 +264,65 @@ func (f *FROST) Aggregate(
 	}
 
 	return &Signature{R: R, Z: z}, nil
+}
+
+// VerifyShare verifies an individual signature share against the signer's
+// public key. This can be used by a coordinator to detect malicious signers
+// before aggregation.
+//
+// The verification equation is: z_i * G == R_i + c * lambda_i * PK_i
+// where R_i = D_i + rho_i * E_i is the signer's effective commitment.
+func (f *FROST) VerifyShare(
+	share *SignatureShare,
+	publicKey group.Point,
+	message []byte,
+	commitments []*SigningCommitment,
+	groupKey group.Point,
+) (bool, error) {
+	// Encode commitment list for binding factor computation
+	encCommitList := f.encodeCommitments(commitments)
+	bindingFactors := f.computeBindingFactors(message, encCommitList, commitments)
+
+	// Compute group commitment R = sum(D_i + rho_i * E_i)
+	R := f.group.NewPoint()
+	var signerCommitment *SigningCommitment
+	for _, comm := range commitments {
+		rho := bindingFactors[string(comm.ID.Bytes())]
+		rhoE := f.group.NewPoint().ScalarMult(rho, comm.BindingPoint)
+		term := f.group.NewPoint().Add(comm.HidingPoint, rhoE)
+		R = f.group.NewPoint().Add(R, term)
+		if comm.ID.Equal(share.ID) {
+			signerCommitment = comm
+		}
+	}
+
+	if signerCommitment == nil {
+		return false, errors.New("signer commitment not found")
+	}
+
+	// Compute challenge c = H2(R, GroupKey, message)
+	c := f.hasher.H2(f.group, R.Bytes(), groupKey.Bytes(), message)
+
+	// Compute Lagrange coefficient for this signer
+	lambda, err := f.lagrangeCoefficient(share.ID, commitments)
+	if err != nil {
+		return false, err
+	}
+
+	// Compute R_i = D_i + rho_i * E_i
+	rho := bindingFactors[string(share.ID.Bytes())]
+	rhoE := f.group.NewPoint().ScalarMult(rho, signerCommitment.BindingPoint)
+	Ri := f.group.NewPoint().Add(signerCommitment.HidingPoint, rhoE)
+
+	// LHS: z_i * G
+	lhs := f.group.NewPoint().ScalarMult(share.Z, f.group.Generator())
+
+	// RHS: R_i + c * lambda_i * PK_i
+	lambdaC := f.group.NewScalar().Mul(lambda, c)
+	cLambdaPK := f.group.NewPoint().ScalarMult(lambdaC, publicKey)
+	rhs := f.group.NewPoint().Add(Ri, cLambdaPK)
+
+	return lhs.Equal(rhs), nil
 }
 
 // Verify checks whether a FROST signature is valid for the given message
@@ -207,15 +344,25 @@ func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) boo
 }
 
 // encodeCommitments serializes the commitment list for hashing.
-// The encoding is: ID || HidingPoint || BindingPoint for each commitment.
+// Each field is length-prefixed with a 4-byte big-endian length to prevent
+// ambiguous concatenation boundaries.
 func (f *FROST) encodeCommitments(commitments []*SigningCommitment) []byte {
 	var commBytes []byte
 	for _, c := range commitments {
-		commBytes = append(commBytes, c.ID.Bytes()...)
-		commBytes = append(commBytes, c.HidingPoint.Bytes()...)
-		commBytes = append(commBytes, c.BindingPoint.Bytes()...)
+		commBytes = appendLengthPrefixed(commBytes, c.ID.Bytes())
+		commBytes = appendLengthPrefixed(commBytes, c.HidingPoint.Bytes())
+		commBytes = appendLengthPrefixed(commBytes, c.BindingPoint.Bytes())
 	}
 	return commBytes
+}
+
+// appendLengthPrefixed appends a 4-byte big-endian length prefix followed by data to dst.
+func appendLengthPrefixed(dst, data []byte) []byte {
+	var lenBuf [4]byte
+	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
+	dst = append(dst, lenBuf[:]...)
+	dst = append(dst, data...)
+	return dst
 }
 
 // computeBindingFactors derives the binding factor for each signer from
@@ -235,7 +382,8 @@ func (f *FROST) computeBindingFactors(message, encCommitList []byte, commitments
 // lagrangeCoefficient computes the Lagrange interpolation coefficient for
 // the given participant ID within the set of signing participants.
 // This is used to combine signature shares into a valid threshold signature.
-func (f *FROST) lagrangeCoefficient(id group.Scalar, commitments []*SigningCommitment) group.Scalar {
+// Returns an error if the denominator is zero (e.g., duplicate signer IDs).
+func (f *FROST) lagrangeCoefficient(id group.Scalar, commitments []*SigningCommitment) (group.Scalar, error) {
 	num := f.scalarFromInt(1)
 	den := f.scalarFromInt(1)
 
@@ -250,6 +398,9 @@ func (f *FROST) lagrangeCoefficient(id group.Scalar, commitments []*SigningCommi
 		den = f.group.NewScalar().Mul(den, diff)
 	}
 
-	denInv, _ := f.group.NewScalar().Invert(den)
-	return f.group.NewScalar().Mul(num, denInv)
+	denInv, err := f.group.NewScalar().Invert(den)
+	if err != nil {
+		return nil, errors.New("lagrange coefficient: zero denominator (duplicate signer IDs?)")
+	}
+	return f.group.NewScalar().Mul(num, denInv), nil
 }

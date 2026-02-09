@@ -2,6 +2,7 @@ package frost
 
 import (
 	"crypto/sha256"
+	"math/big"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -28,20 +29,45 @@ func NewSecp256k1Hasher() *Secp256k1Hasher {
 
 func (h *Secp256k1Hasher) hash(tag string, data ...[]byte) []byte {
 	hasher := sha256.New()
-	hasher.Write([]byte(h.Prefix))
-	hasher.Write([]byte(tag))
+	writeLengthPrefixed(hasher, []byte(h.Prefix))
+	writeLengthPrefixed(hasher, []byte(tag))
 	for _, d := range data {
-		hasher.Write(d)
+		writeLengthPrefixed(hasher, d)
 	}
 	return hasher.Sum(nil)
 }
 
-// hashToScalar hashes data and converts to a scalar.
-// The 32-byte output is interpreted as big-endian and reduced mod curve order.
+// hashToScalar hashes data and converts to a scalar using hash-to-field expansion.
+// Two hashes with counter bytes 0x00/0x01 produce 64 bytes for uniform reduction (bias < 2^-128).
+// Delegates to h.hash() for consistent domain separation with all other hash functions.
 func (h *Secp256k1Hasher) hashToScalar(g group.Group, tag string, data ...[]byte) group.Scalar {
-	hash := h.hash(tag, data...)
+	// Copy the slice before appending to avoid aliasing the variadic backing array.
+	d0 := make([][]byte, len(data)+1)
+	copy(d0, data)
+	d0[len(data)] = []byte{0x00}
+	h1 := h.hash(tag, d0...)
+
+	d1 := make([][]byte, len(data)+1)
+	copy(d1, data)
+	d1[len(data)] = []byte{0x01}
+	h2 := h.hash(tag, d1...)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], h1)
+	copy(expanded[32:], h2)
+
+	// Reduce via big.Int to handle secp256k1 SetBytes 32-byte limit.
+	n := new(big.Int).SetBytes(expanded)
+	order := new(big.Int).SetBytes(g.Order())
+	n.Mod(n, order)
+
 	s := g.NewScalar()
-	s.SetBytes(hash)
+	nBytes := n.Bytes()
+	var buf [32]byte
+	copy(buf[32-len(nBytes):], nBytes)
+	if _, err := s.SetBytes(buf[:]); err != nil {
+		panic("hashToScalar: SetBytes failed after reduction: " + err.Error())
+	}
 	return s
 }
 

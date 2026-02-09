@@ -1046,6 +1046,89 @@ func TestSecp256k1Hasher(t *testing.T) {
 	}
 }
 
+func TestDuplicateSignerIDsRejected(t *testing.T) {
+	g := &bjj.BJJ{}
+	f, _ := New(g, 2, 3)
+
+	// Run DKG
+	participants := make([]*Participant, 3)
+	for i := 0; i < 3; i++ {
+		p, _ := f.NewParticipant(rand.Reader, i+1)
+		participants[i] = p
+	}
+
+	broadcasts := make([]*Round1Data, 3)
+	for i, p := range participants {
+		broadcasts[i] = p.Round1Broadcast()
+	}
+
+	for i, sender := range participants {
+		for j := 0; j < 3; j++ {
+			if i == j {
+				continue
+			}
+			privateData := f.Round1PrivateSend(sender, j+1)
+			f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments)
+		}
+	}
+
+	keyShares := make([]*KeyShare, 3)
+	for i, p := range participants {
+		keyShares[i], _ = f.Finalize(p, broadcasts)
+	}
+
+	t.Run("DuplicateCommitmentIDs", func(t *testing.T) {
+		// Generate nonces/commitments for signer 0
+		nonce, commitment, err := f.SignRound1(rand.Reader, keyShares[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Create commitments list with duplicate IDs
+		duplicateCommitments := []*SigningCommitment{commitment, commitment}
+
+		// SignRound2 should reject duplicate signer IDs
+		_, err = f.SignRound2(keyShares[0], nonce, []byte("test"), duplicateCommitments)
+		if err == nil {
+			t.Error("expected error for duplicate signer IDs in commitments")
+		}
+	})
+
+	t.Run("EmptyCommitmentList", func(t *testing.T) {
+		nonce, _, err := f.SignRound1(rand.Reader, keyShares[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		_, err = f.SignRound2(keyShares[0], nonce, []byte("test"), []*SigningCommitment{})
+		if err == nil {
+			t.Error("expected error for empty commitment list")
+		}
+	})
+
+	t.Run("OwnCommitmentMissing", func(t *testing.T) {
+		// Generate nonces for signer 0 and 1
+		nonce0, _, err := f.SignRound1(rand.Reader, keyShares[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, commitment1, err := f.SignRound1(rand.Reader, keyShares[1])
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, commitment2, err := f.SignRound1(rand.Reader, keyShares[2])
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		// Try to sign with signer 0's nonce but only signer 1 and 2's commitments
+		_, err = f.SignRound2(keyShares[0], nonce0, []byte("test"), []*SigningCommitment{commitment1, commitment2})
+		if err == nil {
+			t.Error("expected error when own commitment is missing")
+		}
+	})
+}
+
 func TestSecp256k1WithDifferentThresholds(t *testing.T) {
 	g := secp256k1.New()
 

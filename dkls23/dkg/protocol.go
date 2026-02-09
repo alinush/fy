@@ -10,12 +10,16 @@ import (
 )
 
 // Step1 generates a random polynomial of degree t-1
-func Step1(params *Parameters) []group.Scalar {
+func Step1(params *Parameters) ([]group.Scalar, error) {
 	polynomial := make([]group.Scalar, params.Threshold)
 	for i := uint8(0); i < params.Threshold; i++ {
-		polynomial[i], _ = dkls23.RandomScalar()
+		s, err := dkls23.RandomScalar()
+		if err != nil {
+			return nil, err
+		}
+		polynomial[i] = s
 	}
-	return polynomial
+	return polynomial, nil
 }
 
 // Step2 evaluates the polynomial at every party index (1 to n)
@@ -44,7 +48,7 @@ func Step2(params *Parameters, polynomial []group.Scalar) []group.Scalar {
 }
 
 // Step3 computes poly_point and creates a DLogProof with commitment
-func Step3(partyIndex uint8, sessionID []byte, polyFragments []group.Scalar) (group.Scalar, *ProofCommitment) {
+func Step3(partyIndex uint8, sessionID []byte, polyFragments []group.Scalar) (group.Scalar, *ProofCommitment, error) {
 	// Sum all fragments
 	polyPoint := dkls23.NewScalar()
 	for _, fragment := range polyFragments {
@@ -52,17 +56,23 @@ func Step3(partyIndex uint8, sessionID []byte, polyFragments []group.Scalar) (gr
 	}
 
 	// Create DLogProof
-	proof := dkls23.NewDLogProof(polyPoint, sessionID)
+	proof, err := dkls23.NewDLogProof(polyPoint, sessionID)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Create commitment to the proof point
-	commitment, salt := dkls23.CommitPoint(proof.Point)
+	commitment, salt, err := dkls23.CommitPoint(proof.Point)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	return polyPoint, &ProofCommitment{
 		Index:      partyIndex,
 		Proof:      proof,
 		Commitment: commitment,
 		Salt:       salt,
-	}
+	}, nil
 }
 
 // Step5 validates proofs and computes the public key
@@ -112,7 +122,10 @@ func Step5(params *Parameters, partyIndex uint8, sessionID []byte, proofsCommitm
 				}
 			}
 
-			denomInv, _ := dkls23.ScalarInvert(denominator)
+			denomInv, err := dkls23.ScalarInvert(denominator)
+			if err != nil {
+				return nil, errors.New("lagrange coefficient: zero denominator in Step5")
+			}
 			lj := dkls23.ScalarMul(numerator, denomInv)
 
 			// lj * committed_points[j]
@@ -131,15 +144,21 @@ func Step5(params *Parameters, partyIndex uint8, sessionID []byte, proofsCommitm
 }
 
 // Phase1 executes DKG phase 1
-func Phase1(data *SessionData) *Phase1Output {
-	polynomial := Step1(&data.Parameters)
+func Phase1(data *SessionData) (*Phase1Output, error) {
+	polynomial, err := Step1(&data.Parameters)
+	if err != nil {
+		return nil, err
+	}
 	points := Step2(&data.Parameters, polynomial)
-	return &Phase1Output{PolyPoints: points}
+	return &Phase1Output{PolyPoints: points}, nil
 }
 
 // Phase2 executes DKG phase 2
-func Phase2(data *SessionData, polyFragments []group.Scalar) *Phase2Output {
-	polyPoint, proofCommitment := Step3(data.PartyIndex, data.SessionID, polyFragments)
+func Phase2(data *SessionData, polyFragments []group.Scalar) (*Phase2Output, error) {
+	polyPoint, proofCommitment, err := Step3(data.PartyIndex, data.SessionID, polyFragments)
+	if err != nil {
+		return nil, err
+	}
 
 	// Initialize zero shares
 	zeroKeep := make(map[uint8]*Phase2to3ZeroKeep)
@@ -150,7 +169,10 @@ func Phase2(data *SessionData, polyFragments []group.Scalar) *Phase2Output {
 			continue
 		}
 
-		seed, commitment, salt := GenerateZeroSeedWithCommitment()
+		seed, commitment, salt, err := GenerateZeroSeedWithCommitment()
+		if err != nil {
+			return nil, err
+		}
 
 		zeroKeep[i] = &Phase2to3ZeroKeep{
 			Seed: seed,
@@ -168,7 +190,7 @@ func Phase2(data *SessionData, polyFragments []group.Scalar) *Phase2Output {
 		ProofCommitment: proofCommitment,
 		ZeroKeep:        zeroKeep,
 		ZeroTransmit:    zeroTransmit,
-	}
+	}, nil
 }
 
 // Phase3 executes DKG phase 3

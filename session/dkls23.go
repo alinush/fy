@@ -126,7 +126,11 @@ func (p *DKLS23Participant) DKGPhase1() (*DKLS23DKGPhase1Output, error) {
 		return nil, errors.New("DKG phase 1 already completed")
 	}
 
-	p.phase1Output = dkg.Phase1(p.dkgData)
+	phase1Out, err := dkg.Phase1(p.dkgData)
+	if err != nil {
+		return nil, err
+	}
+	p.phase1Output = phase1Out
 	p.dkgPhase = 1
 
 	return &DKLS23DKGPhase1Output{
@@ -163,7 +167,11 @@ func (p *DKLS23Participant) DKGPhase2(receivedPolyPoints map[uint8]group.Scalar)
 		polyFragments = append(polyFragments, fragment)
 	}
 
-	p.phase2Output = dkg.Phase2(p.dkgData, polyFragments)
+	phase2Out, err := dkg.Phase2(p.dkgData, polyFragments)
+	if err != nil {
+		return nil, err
+	}
+	p.phase2Output = phase2Out
 	p.dkgPhase = 2
 
 	// Convert transmit slice to map for easier routing

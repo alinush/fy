@@ -2,7 +2,9 @@ package bjj
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/big"
 
@@ -39,10 +41,32 @@ func (s *Scalar) reduce() {
 	s.inner.Mod(s.inner, curveOrder)
 }
 
+// assertScalar asserts that s is a *Scalar.
+// Panics with a descriptive message if s is a different group.Scalar implementation.
+// This is by design: mixing scalar types from different groups is a programming error.
+func assertScalar(s group.Scalar) *Scalar {
+	v, ok := s.(*Scalar)
+	if !ok {
+		panic(fmt.Sprintf("bjj: expected *bjj.Scalar, got %T (do not mix group implementations)", s))
+	}
+	return v
+}
+
+// assertPoint asserts that p is a *Point.
+// Panics with a descriptive message if p is a different group.Point implementation.
+// This is by design: mixing point types from different groups is a programming error.
+func assertPoint(p group.Point) *Point {
+	v, ok := p.(*Point)
+	if !ok {
+		panic(fmt.Sprintf("bjj: expected *bjj.Point, got %T (do not mix group implementations)", p))
+	}
+	return v
+}
+
 // Add sets s to a + b (mod curveOrder) and returns s.
 func (s *Scalar) Add(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	s.inner.Add(aScalar.inner, bScalar.inner)
 	s.reduce()
 	return s
@@ -50,8 +74,8 @@ func (s *Scalar) Add(a, b group.Scalar) group.Scalar {
 
 // Sub sets s to a - b (mod curveOrder) and returns s.
 func (s *Scalar) Sub(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	s.inner.Sub(aScalar.inner, bScalar.inner)
 	s.reduce()
 	return s
@@ -59,8 +83,8 @@ func (s *Scalar) Sub(a, b group.Scalar) group.Scalar {
 
 // Mul sets s to a * b (mod curveOrder) and returns s.
 func (s *Scalar) Mul(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	s.inner.Mul(aScalar.inner, bScalar.inner)
 	s.reduce()
 	return s
@@ -68,7 +92,7 @@ func (s *Scalar) Mul(a, b group.Scalar) group.Scalar {
 
 // Negate sets s to -a (mod curveOrder) and returns s.
 func (s *Scalar) Negate(a group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	s.inner.Neg(aScalar.inner)
 	s.reduce()
 	return s
@@ -77,7 +101,7 @@ func (s *Scalar) Negate(a group.Scalar) group.Scalar {
 // Invert sets s to a^(-1) (mod curveOrder) and returns s.
 // Returns an error if a is zero, as zero has no multiplicative inverse.
 func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	if aScalar.IsZero() {
 		return nil, errors.New("cannot invert zero scalar")
 	}
@@ -87,13 +111,15 @@ func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
 
 // Set copies the value of a into s and returns s.
 func (s *Scalar) Set(a group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	s.inner.Set(aScalar.inner)
 	return s
 }
 
 // Bytes returns the scalar as a 32-byte big-endian representation.
 func (s *Scalar) Bytes() []byte {
+	// Ensure scalar is reduced before serialization
+	s.reduce()
 	bytes := s.inner.Bytes()
 	if len(bytes) >= 32 {
 		return bytes[:32]
@@ -106,7 +132,11 @@ func (s *Scalar) Bytes() []byte {
 
 // SetBytes sets s from a big-endian byte slice and returns s.
 // The value is reduced modulo the curve order.
+// Input must be at most 64 bytes (allowing hash-to-field with 128-bit security margin).
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
+	if len(data) > 64 {
+		return nil, errors.New("scalar input exceeds 64 bytes")
+	}
 	s.inner.SetBytes(data)
 	s.reduce()
 	return s, nil
@@ -114,7 +144,7 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 
 // Equal reports whether s and b represent the same scalar value.
 func (s *Scalar) Equal(b group.Scalar) bool {
-	bScalar := b.(*Scalar)
+	bScalar := assertScalar(b)
 	return s.inner.Cmp(bScalar.inner) == 0
 }
 
@@ -134,16 +164,16 @@ type Point struct {
 
 // Add sets p to a + b and returns p.
 func (p *Point) Add(a, b group.Point) group.Point {
-	aPoint := a.(*Point)
-	bPoint := b.(*Point)
+	aPoint := assertPoint(a)
+	bPoint := assertPoint(b)
 	p.inner.Add(&aPoint.inner, &bPoint.inner)
 	return p
 }
 
 // Sub sets p to a - b and returns p.
 func (p *Point) Sub(a, b group.Point) group.Point {
-	aPoint := a.(*Point)
-	bPoint := b.(*Point)
+	aPoint := assertPoint(a)
+	bPoint := assertPoint(b)
 	var negB twistededwards.PointAffine
 	negB.Neg(&bPoint.inner)
 	p.inner.Add(&aPoint.inner, &negB)
@@ -152,22 +182,22 @@ func (p *Point) Sub(a, b group.Point) group.Point {
 
 // Negate sets p to -a and returns p.
 func (p *Point) Negate(a group.Point) group.Point {
-	aPoint := a.(*Point)
+	aPoint := assertPoint(a)
 	p.inner.Neg(&aPoint.inner)
 	return p
 }
 
 // ScalarMult sets p to s * q and returns p.
 func (p *Point) ScalarMult(s group.Scalar, q group.Point) group.Point {
-	scalar := s.(*Scalar)
-	qPoint := q.(*Point)
+	scalar := assertScalar(s)
+	qPoint := assertPoint(q)
 	p.inner.ScalarMultiplication(&qPoint.inner, scalar.inner)
 	return p
 }
 
 // Set copies the value of a into p and returns p.
 func (p *Point) Set(a group.Point) group.Point {
-	aPoint := a.(*Point)
+	aPoint := assertPoint(a)
 	p.inner.Set(&aPoint.inner)
 	return p
 }
@@ -179,10 +209,14 @@ func (p *Point) Bytes() []byte {
 }
 
 // SetBytes sets p from a compressed point encoding and returns p.
-// Returns an error if the data does not represent a valid curve point.
+// Returns an error if the data does not represent a valid curve point
+// or if the point is not in the prime-order subgroup.
 func (p *Point) SetBytes(data []byte) (group.Point, error) {
 	if err := p.inner.Unmarshal(data); err != nil {
 		return nil, err
+	}
+	if !p.IsInSubgroup() {
+		return nil, errors.New("point is not in the prime-order subgroup")
 	}
 	return p, nil
 }
@@ -213,18 +247,31 @@ func (p *Point) SetUncompressedBytes(data []byte) error {
 	if !p.inner.IsOnCurve() {
 		return errors.New("point is not on curve")
 	}
+	// Verify the point is in the prime-order subgroup
+	if !p.IsInSubgroup() {
+		return errors.New("point is not in the prime-order subgroup")
+	}
 	return nil
 }
 
 // Equal reports whether p and b represent the same curve point.
 func (p *Point) Equal(b group.Point) bool {
-	bPoint := b.(*Point)
+	bPoint := assertPoint(b)
 	return p.inner.Equal(&bPoint.inner)
 }
 
 // IsIdentity reports whether p is the identity element (0, 1).
 func (p *Point) IsIdentity() bool {
 	return p.inner.IsZero()
+}
+
+// IsInSubgroup reports whether p is in the prime-order subgroup.
+// BJJ has cofactor 8, so low-order points exist on the curve
+// that are not in the expected subgroup. This checks order * P == identity.
+func (p *Point) IsInSubgroup() bool {
+	var check twistededwards.PointAffine
+	check.ScalarMultiplication(&p.inner, curveOrder)
+	return check.IsZero()
 }
 
 // BJJ implements [group.Group] for the Baby Jubjub curve.
@@ -255,29 +302,46 @@ func (g *BJJ) Generator() group.Point {
 
 // RandomScalar generates a cryptographically random scalar using the
 // provided random source. The result is uniformly distributed in
-// [0, curveOrder).
+// [1, curveOrder-1] using rejection sampling.
 func (g *BJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return nil, err
+	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// 1000 limit gives negligible false failure probability.
+	for attempt := 0; attempt < 1000; attempt++ {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, err
+		}
+		n := new(big.Int).SetBytes(buf[:])
+		if n.Cmp(curveOrder) >= 0 || n.Sign() == 0 {
+			continue // reject and retry
+		}
+		return &Scalar{inner: n}, nil
 	}
-	s := newScalar()
-	s.inner.SetBytes(buf[:])
-	s.reduce()
-	return s, nil
+	return nil, errors.New("RandomScalar: rejection sampling did not converge")
 }
 
 // HashToScalar hashes the provided data to a scalar using SHA-256.
-// Multiple byte slices are concatenated before hashing.
+// Each input is length-prefixed with a 4-byte big-endian length before hashing.
+// Uses hash-to-field expansion (64 bytes) for uniform reduction (bias < 2^-128).
 func (g *BJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
-	h := sha256.New()
-	for _, d := range data {
-		h.Write(d)
+	hashWith := func(counter byte) []byte {
+		h := sha256.New()
+		for _, d := range data {
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
+			h.Write(lenBuf[:])
+			h.Write(d)
+		}
+		h.Write([]byte{counter})
+		return h.Sum(nil)
 	}
-	hash := h.Sum(nil)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], hashWith(0x00))
+	copy(expanded[32:], hashWith(0x01))
 
 	s := newScalar()
-	s.inner.SetBytes(hash)
+	s.inner.SetBytes(expanded)
 	s.reduce()
 	return s, nil
 }

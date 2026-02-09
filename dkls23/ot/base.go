@@ -5,6 +5,7 @@ package ot
 
 import (
 	"errors"
+	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/group"
@@ -36,8 +37,11 @@ func NewSender(sessionID []byte) (*Sender, error) {
 	}
 
 	// Create a proof of discrete log for s
-	sid := append(sessionID, []byte("DLogProof")...)
-	proof := dkls23.NewDLogProof(s, sid)
+	sid := slices.Concat(sessionID, []byte("DLogProof"))
+	proof, err := dkls23.NewDLogProof(s, sid)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Sender{
 		S:     s,
@@ -58,7 +62,7 @@ func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof)
 	h := dkls23.ScalarBaseMult(hScalar)
 
 	// Verify the encryption proof
-	sid := append(sessionID, []byte("EncProof")...)
+	sid := slices.Concat(sessionID, []byte("EncProof"))
 	if !encProof.Verify(sid) {
 		return m0, m1, ErrOTFailed
 	}
@@ -122,10 +126,13 @@ func NewReceiver() (*Receiver, error) {
 }
 
 // Phase1 generates the receiver's data for the given choice bit
-// Returns the secret scalar r (to keep) and the EncProof (to send)
-func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.EncProof) {
+// Returns the secret scalar r (to keep), the EncProof (to send), and an error
+func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.EncProof, error) {
 	// Sample random r
-	rScalar, _ := dkls23.RandomScalar()
+	rScalar, err := dkls23.RandomScalar()
+	if err != nil {
+		return nil, nil, err
+	}
 
 	// Compute h = Hash(receiver_id || seed) * G
 	msgForH := append([]byte("Receiver"), r.Seed[:]...)
@@ -133,14 +140,17 @@ func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.Enc
 	h := dkls23.ScalarBaseMult(hScalar)
 
 	// Create the encryption proof
-	sid := append(sessionID, []byte("EncProof")...)
-	proof := dkls23.NewEncProof(sid, h, rScalar, bit)
+	sid := slices.Concat(sessionID, []byte("EncProof"))
+	proof, err := dkls23.NewEncProof(sid, h, rScalar, bit)
+	if err != nil {
+		return nil, nil, err
+	}
 
-	return rScalar, proof
+	return rScalar, proof, nil
 }
 
 // Phase1Batch generates receiver data for multiple choice bits
-func (r *Receiver) Phase1Batch(sessionID []byte, bits []bool) ([]group.Scalar, []*dkls23.EncProof) {
+func (r *Receiver) Phase1Batch(sessionID []byte, bits []bool) ([]group.Scalar, []*dkls23.EncProof, error) {
 	batchSize := len(bits)
 	vecR := make([]group.Scalar, batchSize)
 	vecProof := make([]*dkls23.EncProof, batchSize)
@@ -149,15 +159,19 @@ func (r *Receiver) Phase1Batch(sessionID []byte, bits []bool) ([]group.Scalar, [
 		// Use different session IDs for different iterations
 		currentSID := append(uint16ToBytes(uint16(i)), sessionID...)
 
-		vecR[i], vecProof[i] = r.Phase1(currentSID, bits[i])
+		var err error
+		vecR[i], vecProof[i], err = r.Phase1(currentSID, bits[i])
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 
-	return vecR, vecProof
+	return vecR, vecProof, nil
 }
 
 // Phase2Step1 verifies the sender's DLogProof and returns the point z
 func (r *Receiver) Phase2Step1(sessionID []byte, dlogProof *dkls23.DLogProof) (group.Point, error) {
-	sid := append(sessionID, []byte("DLogProof")...)
+	sid := slices.Concat(sessionID, []byte("DLogProof"))
 	if !dlogProof.Verify(sid) {
 		return nil, errors.New("sender cheated: DLogProof failed")
 	}

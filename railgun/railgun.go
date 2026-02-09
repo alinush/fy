@@ -177,11 +177,11 @@ func (s *Share) KeyShare() *frost.KeyShare {
 // we have A = Y / 8.
 //
 // This is the same for all participants.
-func (s *Share) SpendingPublicKey() (*big.Int, *big.Int) {
+func (s *Share) SpendingPublicKey() (*big.Int, *big.Int, error) {
 	// Get the FROST group key
 	cp, ok := s.SpendingKeyShare.GroupKey.(*bjj.CircomPoint)
 	if !ok {
-		panic("group key must be CircomPoint for Railgun compatibility")
+		return nil, nil, errors.New("group key must be CircomPoint for Railgun compatibility")
 	}
 
 	// Divide by 8 to get circomlibjs-compatible public key A = Y/8
@@ -189,22 +189,22 @@ func (s *Share) SpendingPublicKey() (*big.Int, *big.Int) {
 	uncompressed := a.UncompressedBytes()
 	x := new(big.Int).SetBytes(uncompressed[0:32])
 	y := new(big.Int).SetBytes(uncompressed[32:64])
-	return x, y
+	return x, y, nil
 }
 
 // InternalGroupKey returns the internal FROST group key Y as (X, Y) coordinates.
 // This is Y = total_sk * Base8, NOT the circomlibjs-compatible public key A = Y/8.
 // Use SpendingPublicKey() for circomlibjs verification.
-func (s *Share) InternalGroupKey() (*big.Int, *big.Int) {
+func (s *Share) InternalGroupKey() (*big.Int, *big.Int, error) {
 	cp, ok := s.SpendingKeyShare.GroupKey.(*bjj.CircomPoint)
 	if !ok {
-		panic("group key must be CircomPoint for Railgun compatibility")
+		return nil, nil, errors.New("group key must be CircomPoint for Railgun compatibility")
 	}
 
 	uncompressed := cp.UncompressedBytes()
 	x := new(big.Int).SetBytes(uncompressed[0:32])
 	y := new(big.Int).SetBytes(uncompressed[32:64])
-	return x, y
+	return x, y, nil
 }
 
 // ShieldPublicKey returns the secp256k1 group public key for shield operations.
@@ -216,12 +216,12 @@ func (s *Share) ShieldPublicKey() []byte {
 
 // ShieldPublicKeyUncompressed returns the secp256k1 group public key in uncompressed format.
 // Returns 65 bytes: 0x04 || X (32 bytes) || Y (32 bytes).
-func (s *Share) ShieldPublicKeyUncompressed() []byte {
+func (s *Share) ShieldPublicKeyUncompressed() ([]byte, error) {
 	p, ok := s.ShieldKeyShare.GroupKey.(*secp256k1.Point)
 	if !ok {
-		panic("shield group key must be secp256k1.Point")
+		return nil, errors.New("shield group key must be secp256k1.Point")
 	}
-	return p.UncompressedBytes()
+	return p.UncompressedBytes(), nil
 }
 
 // GenerateShares runs distributed key generation for both curves.
@@ -405,7 +405,9 @@ func (tw *ThresholdWallet) Verify(groupKey group.Point, message []byte, sig *Sig
 	}
 
 	z := tw.spendingGroup.NewScalar()
-	z.SetBytes(sig.S.Bytes())
+	if _, err := z.SetBytes(sig.S.Bytes()); err != nil {
+		return false
+	}
 
 	frostSig := &frost.Signature{
 		R: r,

@@ -2,6 +2,7 @@ package bjj
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"io"
 	"math/big"
@@ -66,29 +67,46 @@ func (g *RailgunBJJ) Generator() group.Point {
 
 // RandomScalar generates a cryptographically random scalar using the
 // provided random source. The result is uniformly distributed in
-// [0, curveOrder).
+// [1, curveOrder-1] using rejection sampling.
 func (g *RailgunBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	if _, err := io.ReadFull(r, buf[:]); err != nil {
-		return nil, err
+	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// 1000 limit gives negligible false failure probability.
+	for attempt := 0; attempt < 1000; attempt++ {
+		if _, err := io.ReadFull(r, buf[:]); err != nil {
+			return nil, err
+		}
+		n := new(big.Int).SetBytes(buf[:])
+		if n.Cmp(curveOrder) >= 0 || n.Sign() == 0 {
+			continue // reject and retry
+		}
+		return &Scalar{inner: n}, nil
 	}
-	s := newScalar()
-	s.inner.SetBytes(buf[:])
-	s.reduce()
-	return s, nil
+	return nil, errors.New("RandomScalar: rejection sampling did not converge")
 }
 
 // HashToScalar hashes the provided data to a scalar using SHA-256.
-// Multiple byte slices are concatenated before hashing.
+// Each input is length-prefixed with a 4-byte big-endian length before hashing.
+// Uses hash-to-field expansion (64 bytes) for uniform reduction (bias < 2^-128).
 func (g *RailgunBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
-	h := sha256.New()
-	for _, d := range data {
-		h.Write(d)
+	hashWith := func(counter byte) []byte {
+		h := sha256.New()
+		for _, d := range data {
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
+			h.Write(lenBuf[:])
+			h.Write(d)
+		}
+		h.Write([]byte{counter})
+		return h.Sum(nil)
 	}
-	hash := h.Sum(nil)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], hashWith(0x00))
+	copy(expanded[32:], hashWith(0x01))
 
 	s := newScalar()
-	s.inner.SetBytes(hash)
+	s.inner.SetBytes(expanded)
 	s.reduce()
 	return s, nil
 }
@@ -115,6 +133,10 @@ func (p *RailgunPoint) SetUncompressedCoordinates(x, y *big.Int) error {
 	p.inner.Y.SetBigInt(y)
 	if !p.inner.IsOnCurve() {
 		return errors.New("point is not on curve")
+	}
+	// Verify point is in prime-order subgroup (prevents small-subgroup attacks)
+	if !p.Point.IsInSubgroup() {
+		return errors.New("point is not in the prime-order subgroup")
 	}
 	return nil
 }

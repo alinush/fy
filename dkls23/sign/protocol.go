@@ -21,8 +21,14 @@ func (p *Party) Phase1(data *SignData) (
 	}
 
 	// Step 5: Sample secret data
-	instanceKey, _ := dkls23.RandomScalar()
-	inversionMask, _ := dkls23.RandomScalar()
+	instanceKey, err := dkls23.RandomScalar()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	inversionMask, err := dkls23.RandomScalar()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 	instancePoint := dkls23.ScalarBaseMult(instanceKey)
 
 	// Step 6: Prepare messages for each counterparty
@@ -31,13 +37,19 @@ func (p *Party) Phase1(data *SignData) (
 
 	for _, counterparty := range data.Counterparties {
 		// Commit to instance point
-		commitment, salt := dkls23.CommitPoint(instancePoint)
+		commitment, salt, err := dkls23.CommitPoint(instancePoint)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 
 		// Start multiplication protocol as receiver
 		mulSID := buildMulSessionID(p.Index, counterparty, p.SessionID, data.SignID)
 
 		mulReceiver := p.MulReceivers[counterparty]
-		chi, mulKeep, mulData := mulReceiver.RunPhase1(mulSID)
+		chi, mulKeep, mulData, err := mulReceiver.RunPhase1(mulSID)
+		if err != nil {
+			return nil, nil, nil, err
+		}
 
 		keep[counterparty] = &Phase1ToPhase2Keep{
 			Salt:    salt,
@@ -80,7 +92,10 @@ func (p *Party) Phase2(
 	error,
 ) {
 	// Compute Lagrange coefficient
-	lagrange := computeLagrangeCoeff(p.Index, data.Counterparties)
+	lagrange, err := computeLagrangeCoeff(p.Index, data.Counterparties)
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Compute key share and public share
 	// keyShare = polyPoint * lagrange + zeta
@@ -233,6 +248,10 @@ func (p *Party) Phase3(
 
 	// w = messageHash * inversionMask + v * r
 	// In ECDSA, r is the x-coordinate used directly as a scalar (mod n), NOT hashed
+	// ScalarFromBytes performs modular reduction via secp256k1 SetBytes.
+	// xCoord (32 bytes from compressed point) and msgHash (32 bytes from SHA-256)
+	// are always valid inputs. Values >= group order are reduced mod n, matching
+	// standard ECDSA behavior (see SEC 1 v2, Section 4.1.3).
 	xScalar, _ := dkls23.ScalarFromBytes(xCoord)
 	msgScalar, _ := dkls23.ScalarFromBytes(data.MessageHash[:])
 	w := dkls23.ScalarAdd(
@@ -324,7 +343,7 @@ func buildMulSessionID(sender, receiver uint8, sessionID, signID []byte) []byte 
 	return sid
 }
 
-func computeLagrangeCoeff(partyIndex uint8, counterparties []uint8) group.Scalar {
+func computeLagrangeCoeff(partyIndex uint8, counterparties []uint8) (group.Scalar, error) {
 	numerator := dkls23.NewScalar()
 	denominator := dkls23.NewScalar()
 	one := dkls23.NewScalar()
@@ -343,8 +362,11 @@ func computeLagrangeCoeff(partyIndex uint8, counterparties []uint8) group.Scalar
 		denominator = dkls23.ScalarMul(denominator, dkls23.ScalarSub(cpScalar, partyScalar))
 	}
 
-	denomInv, _ := dkls23.ScalarInvert(denominator)
-	return dkls23.ScalarMul(numerator, denomInv)
+	denomInv, err := dkls23.ScalarInvert(denominator)
+	if err != nil {
+		return nil, errors.New("lagrange coefficient: zero denominator (duplicate party indices?)")
+	}
+	return dkls23.ScalarMul(numerator, denomInv), nil
 }
 
 func secp256k1Order() *big.Int {
@@ -367,9 +389,14 @@ func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s gro
 	}
 
 	// Compute s^-1
-	sInv, _ := dkls23.ScalarInvert(s)
+	sInv, err := dkls23.ScalarInvert(s)
+	if err != nil {
+		return false
+	}
 
 	// Compute u1 = msgHash * s^-1, u2 = r * s^-1
+	// ScalarFromBytes performs modular reduction via secp256k1 SetBytes.
+	// Hash outputs and x-coordinates (32 bytes each) are always valid inputs.
 	msgScalar, _ := dkls23.ScalarFromBytes(msgHash[:])
 	rScalar, _ := dkls23.ScalarFromBytes(rBytes)
 

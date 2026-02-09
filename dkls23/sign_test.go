@@ -23,15 +23,27 @@ func TestSign2of2(t *testing.T) {
 	data2 := &dkg.SessionData{Parameters: params, PartyIndex: 2, SessionID: sessionID}
 
 	// DKG Phase 1
-	out1_1 := dkg.Phase1(data1)
-	out1_2 := dkg.Phase1(data2)
+	out1_1, err := dkg.Phase1(data1)
+	if err != nil {
+		t.Fatalf("DKG Phase1 party 1 failed: %v", err)
+	}
+	out1_2, err := dkg.Phase1(data2)
+	if err != nil {
+		t.Fatalf("DKG Phase1 party 2 failed: %v", err)
+	}
 
 	fragments1 := []group.Scalar{out1_1.PolyPoints[0], out1_2.PolyPoints[0]}
 	fragments2 := []group.Scalar{out1_1.PolyPoints[1], out1_2.PolyPoints[1]}
 
 	// DKG Phase 2
-	out2_1 := dkg.Phase2(data1, fragments1)
-	out2_2 := dkg.Phase2(data2, fragments2)
+	out2_1, err := dkg.Phase2(data1, fragments1)
+	if err != nil {
+		t.Fatalf("Phase2 party 1 failed: %v", err)
+	}
+	out2_2, err := dkg.Phase2(data2, fragments2)
+	if err != nil {
+		t.Fatalf("Phase2 party 2 failed: %v", err)
+	}
 
 	// DKG Phase 3
 	out3_1, err := dkg.Phase3(data1, out2_1.ZeroKeep)

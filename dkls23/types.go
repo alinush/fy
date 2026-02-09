@@ -112,9 +112,13 @@ func Hash(msg, salt []byte) HashOutput {
 	return out
 }
 
-// HashAsScalar hashes a message and returns the result as a scalar
+// HashAsScalar hashes a message and returns the result as a scalar.
+// The SHA-256 output (32 bytes) is converted to a scalar via ScalarFromBytes,
+// which performs modular reduction for secp256k1. The error is safe to discard
+// because 32-byte inputs are always valid for SetBytes.
 func HashAsScalar(msg, salt []byte) group.Scalar {
 	hash := Hash(msg, salt)
+	// ScalarFromBytes reduces mod n; 32-byte SHA-256 output is always valid input.
 	s, _ := ScalarFromBytes(hash[:])
 	return s
 }

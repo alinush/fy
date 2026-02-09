@@ -23,19 +23,22 @@ type InteractiveDLogProof struct {
 }
 
 // dlogProveStep1 samples random commitments.
-// Returns (scalar_rand_commitment, point_rand_commitment)
-func dlogProveStep1() (group.Scalar, group.Point) {
+// Returns (scalar_rand_commitment, point_rand_commitment, error)
+func dlogProveStep1() (group.Scalar, group.Point, error) {
 	// Sample a nonzero random scalar
 	var scalarRandCommitment group.Scalar
 	for {
-		s, _ := RandomScalar()
+		s, err := RandomScalar()
+		if err != nil {
+			return nil, nil, err
+		}
 		if !s.IsZero() {
 			scalarRandCommitment = s
 			break
 		}
 	}
 	pointRandCommitment := ScalarBaseMult(scalarRandCommitment)
-	return scalarRandCommitment, pointRandCommitment
+	return scalarRandCommitment, pointRandCommitment, nil
 }
 
 // dlogProveStep2 computes the response for a given challenge.
@@ -43,6 +46,7 @@ func dlogProveStep2(scalar, scalarRandCommitment group.Scalar, challenge []byte)
 	// Convert challenge bytes to scalar (extend to 32 bytes)
 	extended := make([]byte, 32-FischlinT/8)
 	extended = append(extended, challenge...)
+	// Error is impossible: input is always exactly 32 bytes of zero-padding + challenge bytes
 	challengeScalar, _ := ScalarFromBytes(extended)
 
 	// z = r - e*s
@@ -59,6 +63,7 @@ func verifyInteractiveDLogProof(proof *InteractiveDLogProof, point, pointRandCom
 	// Convert challenge bytes to scalar
 	extended := make([]byte, 32-FischlinT/8)
 	extended = append(extended, proof.Challenge...)
+	// Error is impossible: input is always exactly 32 bytes of zero-padding + challenge bytes
 	challengeScalar, _ := ScalarFromBytes(extended)
 
 	// Verify: z*G + e*point == pointRandCommitment
@@ -75,12 +80,16 @@ type DLogProof struct {
 }
 
 // NewDLogProof creates a Schnorr proof using randomized Fischlin transform.
-func NewDLogProof(scalar group.Scalar, sessionID []byte) *DLogProof {
+// Returns an error if the iteration budget is exhausted or CSPRNG fails.
+func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 	// Execute Step 1 R times
 	randCommitments := make([]group.Point, FischlinR)
 	states := make([]group.Scalar, FischlinR)
 	for i := 0; i < FischlinR; i++ {
-		state, randCommitment := dlogProveStep1()
+		state, randCommitment, err := dlogProveStep1()
+		if err != nil {
+			return nil, err
+		}
 		randCommitments[i] = randCommitment
 		states[i] = state
 	}
@@ -97,12 +106,23 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) *DLogProof {
 
 	challengeBytes := FischlinT / 8
 
+	// Total iteration budget across all proof pairs.
+	// Expected iterations: ~32 pairs * ~256 trials/pair = ~8,192.
+	// Budget of 1M (~122x expected) ensures negligible false failure probability.
+	const totalBudget = 1_000_000
+	totalIterations := 0
 	for i := 0; i < FischlinR/2; i++ {
 		var flag bool
 		for firstCounter := 0; firstCounter < 65535 && !flag; firstCounter++ {
+			totalIterations++
+			if totalIterations > totalBudget {
+				return nil, errors.New("Fischlin proof: exceeded iteration budget")
+			}
 			// Sample first challenge
 			firstChallenge := make([]byte, challengeBytes)
-			rand.Read(firstChallenge)
+			if _, err := rand.Read(firstChallenge); err != nil {
+				return nil, err
+			}
 
 			// Execute Step 2 at index i
 			firstProof := dlogProveStep2(scalar, states[i], firstChallenge)
@@ -119,8 +139,14 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) *DLogProof {
 
 			// Search for matching second challenge
 			for secondCounter := 0; secondCounter < 65535; secondCounter++ {
+				totalIterations++
+				if totalIterations > totalBudget {
+					return nil, errors.New("Fischlin proof: exceeded iteration budget")
+				}
 				secondChallenge := make([]byte, challengeBytes)
-				rand.Read(secondChallenge)
+				if _, err := rand.Read(secondChallenge); err != nil {
+					return nil, err
+				}
 
 				// Execute Step 2 at index i + R/2
 				secondProof := dlogProveStep2(scalar, states[i+FischlinR/2], secondChallenge)
@@ -146,6 +172,11 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) *DLogProof {
 		}
 	}
 
+	// Verify all proof pairs were found
+	if len(firstProofs) != FischlinR/2 || len(lastProofs) != FischlinR/2 {
+		return nil, errors.New("Fischlin proof: not all proof pairs found within budget")
+	}
+
 	// Combine proofs
 	proofs := append(firstProofs, lastProofs...)
 
@@ -153,7 +184,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) *DLogProof {
 		Point:           ScalarBaseMult(scalar),
 		RandCommitments: randCommitments,
 		Proofs:          proofs,
-	}
+	}, nil
 }
 
 // Verify verifies a DLogProof.
@@ -234,11 +265,14 @@ type CPProof struct {
 }
 
 // cpProveStep1 samples random commitments for Chaum-Pedersen.
-func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments) {
+func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments, error) {
 	// Sample a nonzero random scalar
 	var scalarRandCommitment group.Scalar
 	for {
-		s, _ := RandomScalar()
+		s, err := RandomScalar()
+		if err != nil {
+			return nil, nil, err
+		}
 		if !s.IsZero() {
 			scalarRandCommitment = s
 			break
@@ -248,7 +282,7 @@ func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments) {
 	rcG := ScalarMult(baseG, scalarRandCommitment)
 	rcH := ScalarMult(baseH, scalarRandCommitment)
 
-	return scalarRandCommitment, &RandomCommitments{RcG: rcG, RcH: rcH}
+	return scalarRandCommitment, &RandomCommitments{RcG: rcG, RcH: rcH}, nil
 }
 
 // cpProveStep2 computes the response for Chaum-Pedersen.
@@ -277,9 +311,15 @@ func verifyCPProof(proof *CPProof, randCommitments *RandomCommitments, challenge
 }
 
 // cpSimulate simulates a "fake" Chaum-Pedersen proof.
-func cpSimulate(baseG, baseH, pointU, pointV group.Point) (*RandomCommitments, group.Scalar, *CPProof) {
-	challenge, _ := RandomScalar()
-	challengeResponse, _ := RandomScalar()
+func cpSimulate(baseG, baseH, pointU, pointV group.Point) (*RandomCommitments, group.Scalar, *CPProof, error) {
+	challenge, err := RandomScalar()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	challengeResponse, err := RandomScalar()
+	if err != nil {
+		return nil, nil, nil, err
+	}
 
 	// Compute "random" commitments that work for this challenge
 	rcG := PointAdd(ScalarMult(baseG, challengeResponse), ScalarMult(pointU, challenge))
@@ -291,7 +331,7 @@ func cpSimulate(baseG, baseH, pointU, pointV group.Point) (*RandomCommitments, g
 		PointU:           pointU,
 		PointV:           pointV,
 		ChallengeReponse: challengeResponse,
-	}
+	}, nil
 }
 
 // EncProof is an encryption proof for the Endemic OT protocol.
@@ -306,7 +346,7 @@ type EncProof struct {
 }
 
 // NewEncProof creates an encryption proof for OT.
-func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit bool) *EncProof {
+func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit bool) (*EncProof, error) {
 	baseG := Generator()
 
 	// u = r * H (independent of bit)
@@ -323,10 +363,16 @@ func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit b
 	}
 
 	// Real proof commitments
-	realScalarCommitment, realCommitments := cpProveStep1(baseG, baseH)
+	realScalarCommitment, realCommitments, err := cpProveStep1(baseG, baseH)
+	if err != nil {
+		return nil, err
+	}
 
 	// Fake proof (simulated)
-	fakeCommitments, fakeChallenge, fakeProof := cpSimulate(baseG, baseH, fakeV, u)
+	fakeCommitments, fakeChallenge, fakeProof, err := cpSimulate(baseG, baseH, fakeV, u)
+	if err != nil {
+		return nil, err
+	}
 
 	// Fiat-Shamir: compute total challenge
 	baseGBytes := PointToBytes(baseG)
@@ -376,7 +422,7 @@ func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit b
 			Commitments1: realCommitments,
 			Challenge0:   fakeChallenge,
 			Challenge1:   realChallenge,
-		}
+		}, nil
 	}
 	return &EncProof{
 		Proof0:       realProof,
@@ -385,7 +431,7 @@ func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit b
 		Commitments1: fakeCommitments,
 		Challenge0:   realChallenge,
 		Challenge1:   fakeChallenge,
-	}
+	}, nil
 }
 
 // Verify verifies an EncProof.
@@ -443,12 +489,14 @@ func (p *EncProof) GetUAndV() (group.Point, group.Point) {
 }
 
 // CommitPoint creates a hash commitment to a point.
-func CommitPoint(point group.Point) (HashOutput, []byte) {
+func CommitPoint(point group.Point) (HashOutput, []byte, error) {
 	salt := make([]byte, 2*Security)
-	rand.Read(salt)
+	if _, err := rand.Read(salt); err != nil {
+		return HashOutput{}, nil, err
+	}
 	pointBytes := PointToBytes(point)
 	commitment := Hash(pointBytes, salt)
-	return commitment, salt
+	return commitment, salt, nil
 }
 
 // VerifyCommitmentPoint verifies a point commitment.

@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 
 	"github.com/f3rmion/fy/frost"
@@ -100,13 +101,30 @@ func (s *SigningSession) Sign(allCommitments []*frost.SigningCommitment) (*frost
 	return s.frost.SignRound2(s.keyShare, s.nonce, s.message, allCommitments)
 }
 
-// zeroNonces zeroes out the secret nonce values to prevent accidental reuse.
+// zeroNonces overwrites secret nonce values before releasing them.
+// This is a best-effort defense-in-depth measure. Limitations:
+//   - SetBytes creates new internal state in math/big rather than overwriting
+//     existing memory, so old words may persist in GC-managed memory.
+//   - runtime.KeepAlive prevents GC collection before SetBytes completes,
+//     but cannot prevent GC from copying the object during compaction.
+//
+// For stronger guarantees, use a scalar implementation backed by fixed-size
+// byte arrays rather than math/big. Despite these limitations, overwriting
+// reduces the exposure window and is the standard Go best-effort approach.
 func (s *SigningSession) zeroNonces() {
 	if s.nonce == nil {
 		return
 	}
-	// Zero the nonce scalars by setting them to a new zero scalar
-	// This is a best-effort cleanup; Go doesn't guarantee memory zeroing
+	// Overwrite the scalar bytes with zeros before dropping the reference
+	zeroBytes := make([]byte, 32)
+	if s.nonce.D != nil {
+		s.nonce.D.SetBytes(zeroBytes)
+		runtime.KeepAlive(s.nonce.D)
+	}
+	if s.nonce.E != nil {
+		s.nonce.E.SetBytes(zeroBytes)
+		runtime.KeepAlive(s.nonce.E)
+	}
 	s.nonce = nil
 }
 

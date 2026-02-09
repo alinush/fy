@@ -11,7 +11,10 @@ func TestStep1And2(t *testing.T) {
 	params := &Parameters{Threshold: 2, ShareCount: 3}
 
 	// Generate polynomial
-	poly := Step1(params)
+	poly, err := Step1(params)
+	if err != nil {
+		t.Fatalf("Step1 failed: %v", err)
+	}
 	if len(poly) != int(params.Threshold) {
 		t.Errorf("Expected polynomial of degree %d, got %d", params.Threshold, len(poly))
 	}
@@ -35,8 +38,14 @@ func TestDKG2of2(t *testing.T) {
 	data2 := &SessionData{Parameters: params, PartyIndex: 2, SessionID: sessionID}
 
 	// Phase 1: Generate polynomial points
-	out1_1 := Phase1(data1)
-	out1_2 := Phase1(data2)
+	out1_1, err := Phase1(data1)
+	if err != nil {
+		t.Fatalf("Phase1 party 1 failed: %v", err)
+	}
+	out1_2, err := Phase1(data2)
+	if err != nil {
+		t.Fatalf("Phase1 party 2 failed: %v", err)
+	}
 
 	// Communication: Exchange polynomial fragments
 	// Party 1 receives: p1(1), p2(1)
@@ -45,8 +54,14 @@ func TestDKG2of2(t *testing.T) {
 	fragments2 := []group.Scalar{out1_1.PolyPoints[1], out1_2.PolyPoints[1]}
 
 	// Phase 2: Compute poly_point and proof
-	out2_1 := Phase2(data1, fragments1)
-	out2_2 := Phase2(data2, fragments2)
+	out2_1, err := Phase2(data1, fragments1)
+	if err != nil {
+		t.Fatalf("Phase2 party 1 failed: %v", err)
+	}
+	out2_2, err := Phase2(data2, fragments2)
+	if err != nil {
+		t.Fatalf("Phase2 party 2 failed: %v", err)
+	}
 
 	// Phase 3: Initialize zero shares and multiplication
 	out3_1, err := Phase3(data1, out2_1.ZeroKeep)
@@ -127,7 +142,11 @@ func TestDKG2of3(t *testing.T) {
 	// Phase 1
 	phase1Out := make([]*Phase1Output, 3)
 	for i := 0; i < 3; i++ {
-		phase1Out[i] = Phase1(data[i])
+		var err error
+		phase1Out[i], err = Phase1(data[i])
+		if err != nil {
+			t.Fatalf("Phase1 party %d failed: %v", i+1, err)
+		}
 	}
 
 	// Gather fragments for each party
@@ -142,7 +161,11 @@ func TestDKG2of3(t *testing.T) {
 	// Phase 2
 	phase2Out := make([]*Phase2Output, 3)
 	for i := 0; i < 3; i++ {
-		phase2Out[i] = Phase2(data[i], fragments[i])
+		var err error
+		phase2Out[i], err = Phase2(data[i], fragments[i])
+		if err != nil {
+			t.Fatalf("Phase2 party %d failed: %v", i+1, err)
+		}
 	}
 
 	// Phase 3
@@ -245,8 +268,14 @@ func TestFixedPolynomials(t *testing.T) {
 	fragments2 := []group.Scalar{three, four} // p(2) = 7
 
 	// Phase 2 (using Step3 directly for fixed polynomial test)
-	polyPoint1, proof1 := Step3(1, sessionID, fragments1)
-	polyPoint2, proof2 := Step3(2, sessionID, fragments2)
+	polyPoint1, proof1, err := Step3(1, sessionID, fragments1)
+	if err != nil {
+		t.Fatalf("Step3 party 1 failed: %v", err)
+	}
+	polyPoint2, proof2, err := Step3(2, sessionID, fragments2)
+	if err != nil {
+		t.Fatalf("Step3 party 2 failed: %v", err)
+	}
 
 	proofsCommitments := []*ProofCommitment{proof1, proof2}
 

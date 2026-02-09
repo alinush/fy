@@ -8,8 +8,11 @@ package secp256k1
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
+	"math/big"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/f3rmion/fy/group"
@@ -24,6 +27,28 @@ type Scalar struct {
 	inner secp256k1.ModNScalar
 }
 
+// assertScalar asserts that s is a *Scalar.
+// Panics with a descriptive message if s is a different group.Scalar implementation.
+// This is by design: mixing scalar types from different groups is a programming error.
+func assertScalar(s group.Scalar) *Scalar {
+	v, ok := s.(*Scalar)
+	if !ok {
+		panic(fmt.Sprintf("secp256k1: expected *secp256k1.Scalar, got %T (do not mix group implementations)", s))
+	}
+	return v
+}
+
+// assertPoint asserts that p is a *Point.
+// Panics with a descriptive message if p is a different group.Point implementation.
+// This is by design: mixing point types from different groups is a programming error.
+func assertPoint(p group.Point) *Point {
+	v, ok := p.(*Point)
+	if !ok {
+		panic(fmt.Sprintf("secp256k1: expected *secp256k1.Point, got %T (do not mix group implementations)", p))
+	}
+	return v
+}
+
 // newScalar creates a new scalar initialized to zero.
 func newScalar() *Scalar {
 	return &Scalar{}
@@ -31,16 +56,16 @@ func newScalar() *Scalar {
 
 // Add sets s to a + b (mod n) and returns s.
 func (s *Scalar) Add(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	s.inner.Add2(&aScalar.inner, &bScalar.inner)
 	return s
 }
 
 // Sub sets s to a - b (mod n) and returns s.
 func (s *Scalar) Sub(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	// a - b = a + (-b)
 	var negB secp256k1.ModNScalar
 	negB.NegateVal(&bScalar.inner)
@@ -50,23 +75,28 @@ func (s *Scalar) Sub(a, b group.Scalar) group.Scalar {
 
 // Mul sets s to a * b (mod n) and returns s.
 func (s *Scalar) Mul(a, b group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
-	bScalar := b.(*Scalar)
+	aScalar := assertScalar(a)
+	bScalar := assertScalar(b)
 	s.inner.Mul2(&aScalar.inner, &bScalar.inner)
 	return s
 }
 
 // Negate sets s to -a (mod n) and returns s.
 func (s *Scalar) Negate(a group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	s.inner.NegateVal(&aScalar.inner)
 	return s
 }
 
 // Invert sets s to a^(-1) (mod n) and returns s.
 // Returns an error if a is zero, as zero has no multiplicative inverse.
+//
+// Note: This uses dcrd's InverseValNonConst which is not constant-time.
+// In FROST, this is used for Lagrange coefficient computation where the
+// input (denominator of Lagrange basis) is derived from public participant
+// IDs, not secret values, so timing leakage is acceptable.
 func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	if aScalar.inner.IsZero() {
 		return nil, errors.New("cannot invert zero scalar")
 	}
@@ -76,7 +106,7 @@ func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
 
 // Set copies the value of a into s and returns s.
 func (s *Scalar) Set(a group.Scalar) group.Scalar {
-	aScalar := a.(*Scalar)
+	aScalar := assertScalar(a)
 	s.inner.Set(&aScalar.inner)
 	return s
 }
@@ -89,7 +119,13 @@ func (s *Scalar) Bytes() []byte {
 }
 
 // SetBytes sets s from a big-endian byte slice and returns s.
-// The value is reduced modulo the curve order.
+// For inputs >= 32 bytes, only the first 32 bytes are used (silent truncation).
+// For inputs < 32 bytes, the value is right-aligned (zero-padded on the left).
+// The 32-byte value is then reduced modulo the curve order by dcrd's SetBytes.
+//
+// WARNING: Inputs > 32 bytes are silently truncated, NOT reduced modulo order.
+// Callers needing modular reduction of larger values (e.g., hash-to-field with
+// 64-byte expansion) must pre-reduce via big.Int before calling SetBytes.
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 	// Pad or truncate to 32 bytes
 	var bytes [32]byte
@@ -105,7 +141,7 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 
 // Equal reports whether s and b represent the same scalar value.
 func (s *Scalar) Equal(b group.Scalar) bool {
-	bScalar := b.(*Scalar)
+	bScalar := assertScalar(b)
 	return s.inner.Equals(&bScalar.inner)
 }
 
@@ -132,16 +168,16 @@ func newPoint() *Point {
 
 // Add sets p to a + b and returns p.
 func (p *Point) Add(a, b group.Point) group.Point {
-	aPoint := a.(*Point)
-	bPoint := b.(*Point)
+	aPoint := assertPoint(a)
+	bPoint := assertPoint(b)
 	secp256k1.AddNonConst(&aPoint.inner, &bPoint.inner, &p.inner)
 	return p
 }
 
 // Sub sets p to a - b and returns p.
 func (p *Point) Sub(a, b group.Point) group.Point {
-	aPoint := a.(*Point)
-	bPoint := b.(*Point)
+	aPoint := assertPoint(a)
+	bPoint := assertPoint(b)
 	// a - b = a + (-b)
 	var negB secp256k1.JacobianPoint
 	negB.Set(&bPoint.inner)
@@ -153,7 +189,7 @@ func (p *Point) Sub(a, b group.Point) group.Point {
 
 // Negate sets p to -a and returns p.
 func (p *Point) Negate(a group.Point) group.Point {
-	aPoint := a.(*Point)
+	aPoint := assertPoint(a)
 	p.inner.Set(&aPoint.inner)
 	p.inner.Y.Negate(1)
 	p.inner.Y.Normalize()
@@ -162,15 +198,15 @@ func (p *Point) Negate(a group.Point) group.Point {
 
 // ScalarMult sets p to s * q and returns p.
 func (p *Point) ScalarMult(s group.Scalar, q group.Point) group.Point {
-	scalar := s.(*Scalar)
-	qPoint := q.(*Point)
+	scalar := assertScalar(s)
+	qPoint := assertPoint(q)
 	secp256k1.ScalarMultNonConst(&scalar.inner, &qPoint.inner, &p.inner)
 	return p
 }
 
 // Set copies the value of a into p and returns p.
 func (p *Point) Set(a group.Point) group.Point {
-	aPoint := a.(*Point)
+	aPoint := assertPoint(a)
 	p.inner.Set(&aPoint.inner)
 	return p
 }
@@ -229,7 +265,7 @@ func (p *Point) UncompressedBytes() []byte {
 
 // Equal reports whether p and b represent the same curve point.
 func (p *Point) Equal(b group.Point) bool {
-	bPoint := b.(*Point)
+	bPoint := assertPoint(b)
 	// Convert both to affine for comparison
 	var pAffine, bAffine secp256k1.JacobianPoint
 	pAffine.Set(&p.inner)
@@ -314,18 +350,34 @@ func (g *Secp256k1) RandomScalar(r io.Reader) (group.Scalar, error) {
 }
 
 // HashToScalar hashes the provided data to a scalar using SHA-256.
-// Multiple byte slices are concatenated before hashing.
-// The result is reduced modulo the curve order.
+// Each input is length-prefixed with a 4-byte big-endian length before hashing.
+// Uses hash-to-field expansion (64 bytes) for uniform reduction (bias < 2^-128).
 func (g *Secp256k1) HashToScalar(data ...[]byte) (group.Scalar, error) {
-	h := sha256.New()
-	for _, d := range data {
-		h.Write(d)
+	hashWith := func(counter byte) []byte {
+		h := sha256.New()
+		for _, d := range data {
+			var lenBuf [4]byte
+			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
+			h.Write(lenBuf[:])
+			h.Write(d)
+		}
+		h.Write([]byte{counter})
+		return h.Sum(nil)
 	}
-	hash := h.Sum(nil)
+
+	expanded := make([]byte, 64)
+	copy(expanded[:32], hashWith(0x00))
+	copy(expanded[32:], hashWith(0x01))
+
+	// Interpret as big-endian integer and reduce mod order
+	n := new(big.Int).SetBytes(expanded)
+	order := new(big.Int).SetBytes(g.Order())
+	n.Mod(n, order)
 
 	s := newScalar()
 	var bytes [32]byte
-	copy(bytes[:], hash)
+	nBytes := n.Bytes()
+	copy(bytes[32-len(nBytes):], nBytes)
 	s.inner.SetBytes(&bytes)
 	return s, nil
 }

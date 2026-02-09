@@ -111,10 +111,13 @@ type Phase4Input struct {
 }
 
 // CommitBytes creates a hash commitment to bytes
-func CommitBytes(data []byte) (dkls23.HashOutput, []byte) {
-	salt, _ := dkls23.RandBytes(32)
+func CommitBytes(data []byte) (dkls23.HashOutput, []byte, error) {
+	salt, err := dkls23.RandBytes(32)
+	if err != nil {
+		return dkls23.HashOutput{}, nil, err
+	}
 	combined := append(data, salt...)
-	return dkls23.Hash(combined, nil), salt
+	return dkls23.Hash(combined, nil), salt, nil
 }
 
 // VerifyCommitBytes verifies a byte commitment
@@ -125,12 +128,18 @@ func VerifyCommitBytes(data []byte, commitment dkls23.HashOutput, salt []byte) b
 }
 
 // GenerateZeroSeedWithCommitment generates a seed and its commitment
-func GenerateZeroSeedWithCommitment() (ZeroSeed, dkls23.HashOutput, []byte) {
-	seedBytes, _ := dkls23.RandBytes(dkls23.Security)
+func GenerateZeroSeedWithCommitment() (ZeroSeed, dkls23.HashOutput, []byte, error) {
+	seedBytes, err := dkls23.RandBytes(dkls23.Security)
+	if err != nil {
+		return ZeroSeed{}, dkls23.HashOutput{}, nil, err
+	}
 	var seed ZeroSeed
 	copy(seed[:], seedBytes)
-	commitment, salt := CommitBytes(seed[:])
-	return seed, commitment, salt
+	commitment, salt, err := CommitBytes(seed[:])
+	if err != nil {
+		return ZeroSeed{}, dkls23.HashOutput{}, nil, err
+	}
+	return seed, commitment, salt, nil
 }
 
 // VerifyZeroSeed verifies a zero seed commitment

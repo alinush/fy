@@ -55,12 +55,18 @@ func InitExtSenderPhase1(sessionID []byte) (*Receiver, []bool, []group.Scalar, [
 
 	// Sample random correlation bits
 	correlation := make([]bool, Kappa)
-	randBytes, _ := dkls23.RandBytes(Kappa / 8)
+	randBytes, err := dkls23.RandBytes(Kappa / 8)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 	for i := 0; i < Kappa; i++ {
 		correlation[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
 
-	vecR, encProofs := otReceiver.Phase1Batch(sessionID, correlation)
+	vecR, encProofs, err := otReceiver.Phase1Batch(sessionID, correlation)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
 
 	return otReceiver, correlation, vecR, encProofs, nil
 }
@@ -115,10 +121,13 @@ func InitExtReceiverPhase2(
 }
 
 // RunPhase1 runs the first phase of the receiver's protocol
-func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutput, *DataToSender) {
+func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutput, *DataToSender, error) {
 	// Extend choice bits with random noise
 	randomBits := make([]bool, OTSecurity)
-	randBytes, _ := dkls23.RandBytes(OTSecurity / 8)
+	randBytes, err := dkls23.RandBytes(OTSecurity / 8)
+	if err != nil {
+		return nil, nil, err
+	}
 	for i := 0; i < OTSecurity; i++ {
 		randomBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
@@ -180,7 +189,7 @@ func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutpu
 		U:       u,
 		VerifyX: verifyX,
 		VerifyT: verifyT,
-	}
+	}, nil
 }
 
 // RunPhase2 finishes the receiver's protocol

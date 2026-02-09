@@ -233,11 +233,20 @@ func (p *Participant) SetKeyShare(ks *frost.KeyShare) {
 
 // scalarToInt extracts the integer value from a scalar.
 // This assumes the scalar represents a small integer (participant ID).
+// Reads the last 4 bytes as a big-endian uint32 to support IDs up to 2^32-1.
 func scalarToInt(s group.Scalar) int {
-	bytes := s.Bytes()
-	// Participant IDs are small, so we just need the last byte
-	if len(bytes) > 0 {
-		return int(bytes[len(bytes)-1])
+	b := s.Bytes()
+	if len(b) == 0 {
+		return 0
 	}
-	return 0
+	// Read up to the last 4 bytes as big-endian
+	n := 0
+	start := len(b) - 4
+	if start < 0 {
+		start = 0
+	}
+	for _, v := range b[start:] {
+		n = n<<8 | int(v)
+	}
+	return n
 }
