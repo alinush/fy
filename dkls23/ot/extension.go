@@ -132,7 +132,9 @@ func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutpu
 	for i := 0; i < OTSecurity; i++ {
 		randomBits[i] = (randBytes[i/8]>>(i%8))&1 == 1
 	}
-	extendedBits := append(choiceBits, randomBits...)
+	extendedBits := make([]bool, len(choiceBits)+len(randomBits))
+	copy(extendedBits, choiceBits)
+	copy(extendedBits[len(choiceBits):], randomBits)
 
 	// Compress extended bits to bytes
 	compressedBits := bitsToBytes(extendedBits)
@@ -407,10 +409,7 @@ func cutAndTranspose(input []PRGOutput) [][Kappa / 8]byte {
 }
 
 func buildSalt(j uint16, sessionID []byte, iteration uint8) []byte {
-	salt := slices.Concat(uint16ToBytes(j), sessionID)
-	salt = append(salt, []byte("Iteration number:")...)
-	salt = append(salt, iteration)
-	return salt
+	return slices.Concat(uint16ToBytes(j), sessionID, []byte("Iteration number:"), []byte{iteration})
 }
 
 // fieldMul multiplies two elements in GF(2^OTSecurity)

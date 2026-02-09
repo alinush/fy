@@ -2,6 +2,7 @@ package frost
 
 import (
 	"errors"
+	"fmt"
 	"io"
 
 	"github.com/f3rmion/fy/group"
@@ -132,6 +133,11 @@ func (f *FROST) Round2ReceiveShare(p *Participant, data *Round1PrivateData, send
 // The returned [KeyShare] contains the participant's secret key share and
 // the group's combined public key, which is the same for all participants.
 func (f *FROST) Finalize(p *Participant, allBroadcasts []*Round1Data) (*KeyShare, error) {
+	// Verify we received shares from all other participants
+	expectedShares := len(allBroadcasts) - 1
+	if len(p.receivedShares) != expectedShares {
+		return nil, fmt.Errorf("expected %d shares from other participants, got %d", expectedShares, len(p.receivedShares))
+	}
 	// Sum all received shares (including our own)
 	secretKey := f.evalPolynomial(p.coefficients, p.id)
 	for _, share := range p.receivedShares {

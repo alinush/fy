@@ -12,6 +12,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"errors"
+	"slices"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -135,10 +136,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 			// Compute first hash
 			iBytes := make([]byte, 2)
 			binary.BigEndian.PutUint16(iBytes, uint16(i))
-			firstMsg := append(PointToBytes(Generator()), rcAsBytes...)
-			firstMsg = append(firstMsg, iBytes...)
-			firstMsg = append(firstMsg, firstChallenge...)
-			firstMsg = append(firstMsg, firstProof.ChallengeReponse.Bytes()...)
+			firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, firstChallenge, firstProof.ChallengeReponse.Bytes())
 			firstHashFull := Hash(firstMsg, sessionID)
 			firstHash := firstHashFull[:FischlinL/4]
 
@@ -163,10 +161,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 				// Compute second hash
 				i2Bytes := make([]byte, 2)
 				binary.BigEndian.PutUint16(i2Bytes, uint16(i+FischlinR/2))
-				secondMsg := append(PointToBytes(Generator()), rcAsBytes...)
-				secondMsg = append(secondMsg, i2Bytes...)
-				secondMsg = append(secondMsg, secondChallenge...)
-				secondMsg = append(secondMsg, secondProof.ChallengeReponse.Bytes()...)
+				secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, secondChallenge, secondProof.ChallengeReponse.Bytes())
 				secondHashFull := Hash(secondMsg, sessionID)
 				secondHash := secondHashFull[:FischlinL/4]
 
@@ -236,20 +231,14 @@ func (p *DLogProof) Verify(sessionID []byte) bool {
 		// Compute first hash
 		iBytes := make([]byte, 2)
 		binary.BigEndian.PutUint16(iBytes, uint16(i))
-		firstMsg := append(PointToBytes(Generator()), rcAsBytes...)
-		firstMsg = append(firstMsg, iBytes...)
-		firstMsg = append(firstMsg, p.Proofs[i].Challenge...)
-		firstMsg = append(firstMsg, p.Proofs[i].ChallengeReponse.Bytes()...)
+		firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, p.Proofs[i].Challenge, p.Proofs[i].ChallengeReponse.Bytes())
 		firstHashFull := Hash(firstMsg, sessionID)
 		firstHash := firstHashFull[:FischlinL/4]
 
 		// Compute second hash
 		i2Bytes := make([]byte, 2)
 		binary.BigEndian.PutUint16(i2Bytes, uint16(i+FischlinR/2))
-		secondMsg := append(PointToBytes(Generator()), rcAsBytes...)
-		secondMsg = append(secondMsg, i2Bytes...)
-		secondMsg = append(secondMsg, p.Proofs[i+FischlinR/2].Challenge...)
-		secondMsg = append(secondMsg, p.Proofs[i+FischlinR/2].ChallengeReponse.Bytes()...)
+		secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, p.Proofs[i+FischlinR/2].Challenge, p.Proofs[i+FischlinR/2].ChallengeReponse.Bytes())
 		secondHashFull := Hash(secondMsg, sessionID)
 		secondHash := secondHashFull[:FischlinL/4]
 
@@ -405,22 +394,10 @@ func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit b
 	var msgForChallenge []byte
 	if bit {
 		// Fake proof (v) goes first, real proof (v-h) goes second
-		msgForChallenge = append(baseGBytes, baseHBytes...)
-		msgForChallenge = append(msgForChallenge, uBytes...)
-		msgForChallenge = append(msgForChallenge, vBytes...)
-		msgForChallenge = append(msgForChallenge, fRcGBytes...)
-		msgForChallenge = append(msgForChallenge, fRcHBytes...)
-		msgForChallenge = append(msgForChallenge, rRcGBytes...)
-		msgForChallenge = append(msgForChallenge, rRcHBytes...)
+		msgForChallenge = slices.Concat(baseGBytes, baseHBytes, uBytes, vBytes, fRcGBytes, fRcHBytes, rRcGBytes, rRcHBytes)
 	} else {
 		// Real proof (v) goes first, fake proof (v-h) goes second
-		msgForChallenge = append(baseGBytes, baseHBytes...)
-		msgForChallenge = append(msgForChallenge, uBytes...)
-		msgForChallenge = append(msgForChallenge, vBytes...)
-		msgForChallenge = append(msgForChallenge, rRcGBytes...)
-		msgForChallenge = append(msgForChallenge, rRcHBytes...)
-		msgForChallenge = append(msgForChallenge, fRcGBytes...)
-		msgForChallenge = append(msgForChallenge, fRcHBytes...)
+		msgForChallenge = slices.Concat(baseGBytes, baseHBytes, uBytes, vBytes, rRcGBytes, rRcHBytes, fRcGBytes, fRcHBytes)
 	}
 
 	challenge := HashAsScalar(msgForChallenge, sessionID)
@@ -490,13 +467,7 @@ func (p *EncProof) Verify(sessionID []byte) bool {
 	rc1GBytes := PointToBytes(p.Commitments1.RcG)
 	rc1HBytes := PointToBytes(p.Commitments1.RcH)
 
-	msgForChallenge := append(baseGBytes, baseHBytes...)
-	msgForChallenge = append(msgForChallenge, uBytes...)
-	msgForChallenge = append(msgForChallenge, vBytes...)
-	msgForChallenge = append(msgForChallenge, rc0GBytes...)
-	msgForChallenge = append(msgForChallenge, rc0HBytes...)
-	msgForChallenge = append(msgForChallenge, rc1GBytes...)
-	msgForChallenge = append(msgForChallenge, rc1HBytes...)
+	msgForChallenge := slices.Concat(baseGBytes, baseHBytes, uBytes, vBytes, rc0GBytes, rc0HBytes, rc1GBytes, rc1HBytes)
 
 	expectedChallenge := HashAsScalar(msgForChallenge, sessionID)
 

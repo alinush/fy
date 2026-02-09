@@ -103,9 +103,10 @@ func (s *SigningSession) Sign(allCommitments []*frost.SigningCommitment) (*frost
 
 // zeroNonces overwrites secret nonce values before releasing them.
 // This is a best-effort defense-in-depth measure. Limitations:
-//   - SetBytes creates new internal state in math/big rather than overwriting
-//     existing memory, so old words may persist in GC-managed memory.
-//   - runtime.KeepAlive prevents GC collection before SetBytes completes,
+//   - Sub() modifies the receiver in-place, which is more thorough than SetBytes()
+//     which may allocate new backing memory, but Go's GC may still have copied
+//     old values during compaction.
+//   - runtime.KeepAlive prevents GC collection before Sub completes,
 //     but cannot prevent GC from copying the object during compaction.
 //
 // For stronger guarantees, use a scalar implementation backed by fixed-size
@@ -115,14 +116,16 @@ func (s *SigningSession) zeroNonces() {
 	if s.nonce == nil {
 		return
 	}
-	// Overwrite the scalar bytes with zeros before dropping the reference
-	zeroBytes := make([]byte, 32)
+	// Overwrite scalar internal state by setting to self-subtraction (zero).
+	// Sub() overwrites the receiver's internal words in-place, which is more
+	// thorough than SetBytes() which may allocate new backing memory.
+	// This is still best-effort: Go's GC may have copied the old values.
 	if s.nonce.D != nil {
-		s.nonce.D.SetBytes(zeroBytes)
+		s.nonce.D.Sub(s.nonce.D, s.nonce.D) // D = D - D = 0
 		runtime.KeepAlive(s.nonce.D)
 	}
 	if s.nonce.E != nil {
-		s.nonce.E.SetBytes(zeroBytes)
+		s.nonce.E.Sub(s.nonce.E, s.nonce.E) // E = E - E = 0
 		runtime.KeepAlive(s.nonce.E)
 	}
 	s.nonce = nil
@@ -203,6 +206,22 @@ func QuickSign(
 		nonces[i] = nonce
 		commitments[i] = commitment
 	}
+
+	// Zero nonces after use (defense-in-depth)
+	defer func() {
+		for _, n := range nonces {
+			if n != nil {
+				if n.D != nil {
+					n.D.Sub(n.D, n.D)
+					runtime.KeepAlive(n.D)
+				}
+				if n.E != nil {
+					n.E.Sub(n.E, n.E)
+					runtime.KeepAlive(n.E)
+				}
+			}
+		}
+	}()
 
 	// Round 2: Generate signature shares
 	shares := make([]*frost.SignatureShare, len(signerShares))

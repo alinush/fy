@@ -135,7 +135,7 @@ func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.Enc
 	}
 
 	// Compute h = Hash(receiver_id || seed) * G
-	msgForH := append([]byte("Receiver"), r.Seed[:]...)
+	msgForH := slices.Concat([]byte("Receiver"), r.Seed[:])
 	hScalar := dkls23.HashAsScalar(msgForH, sessionID)
 	h := dkls23.ScalarBaseMult(hScalar)
 

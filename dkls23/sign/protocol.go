@@ -3,6 +3,7 @@ package sign
 import (
 	"errors"
 	"math/big"
+	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/group"
@@ -65,8 +66,7 @@ func (p *Party) Phase1(data *SignData) (
 	}
 
 	// Compute zero share
-	zeroSID := append([]byte("Zero shares protocol"), p.SessionID...)
-	zeroSID = append(zeroSID, data.SignID...)
+	zeroSID := slices.Concat([]byte("Zero shares protocol"), p.SessionID, data.SignID)
 	zeta := p.ComputeZeroShare(data.Counterparties, zeroSID)
 
 	uniqueKeep := &UniqueKeep1to2{
@@ -336,11 +336,7 @@ func (p *Party) Phase4(
 // Helper functions
 
 func buildMulSessionID(sender, receiver uint8, sessionID, signID []byte) []byte {
-	sid := []byte("Multiplication protocol")
-	sid = append(sid, sender, receiver)
-	sid = append(sid, sessionID...)
-	sid = append(sid, signID...)
-	return sid
+	return slices.Concat([]byte("Multiplication protocol"), []byte{sender, receiver}, sessionID, signID)
 }
 
 func computeLagrangeCoeff(partyIndex uint8, counterparties []uint8) (group.Scalar, error) {

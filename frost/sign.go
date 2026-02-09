@@ -72,6 +72,12 @@ func (f *FROST) SignRound1(r io.Reader, share *KeyShare) (*SigningNonce, *Signin
 	if err != nil {
 		return nil, nil, err
 	}
+	// Defense-in-depth: verify nonces are non-zero.
+	// RandomScalar implementations should exclude zero, but a buggy implementation
+	// could leak secret key information if zero nonces are used.
+	if d.IsZero() || e.IsZero() {
+		return nil, nil, errors.New("generated zero nonce (RandomScalar bug)")
+	}
 
 	nonce := &SigningNonce{
 		ID: share.ID,
@@ -283,6 +289,22 @@ func (f *FROST) Aggregate(
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
+	// Validate share IDs match commitment IDs and check for duplicates
+	commitIDs := make(map[string]bool)
+	for _, c := range commitments {
+		commitIDs[string(c.ID.Bytes())] = true
+	}
+	shareIDs := make(map[string]bool)
+	for _, s := range shares {
+		key := string(s.ID.Bytes())
+		if shareIDs[key] {
+			return nil, errors.New("duplicate share ID in aggregation")
+		}
+		shareIDs[key] = true
+		if !commitIDs[key] {
+			return nil, errors.New("share ID does not match any commitment ID")
+		}
+	}
 
 	// Encode commitment list and recompute R
 	encCommitList := f.encodeCommitments(commitments)
@@ -374,6 +396,10 @@ func (f *FROST) VerifyShare(
 // z*G == R + c*Y, where c = H2(R, Y, message).
 func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) bool {
 	if sig == nil || sig.R == nil || sig.Z == nil || groupKey == nil {
+		return false
+	}
+	// Reject identity R per RFC 9591 Section 5.5
+	if sig.R.IsIdentity() {
 		return false
 	}
 	// c = H2(R, GroupKey, message)

@@ -48,6 +48,16 @@ type Hasher interface {
 	H5(g group.Group, encCommitList []byte) []byte
 }
 
+// HasherLimiter is an optional interface that hashers can implement to declare
+// their maximum supported signer count. Hashers with bounded input capacity
+// (e.g., Poseidon with its 16-element limit) should implement this interface.
+// NewWithHasher validates the total parameter against this limit at construction time.
+type HasherLimiter interface {
+	// MaxSigners returns the maximum number of signers this hasher supports.
+	// Returns 0 if there is no limit.
+	MaxSigners() int
+}
+
 // SHA256Hasher implements Hasher using SHA-256.
 // This is the default hasher for general use.
 type SHA256Hasher struct{}
@@ -229,6 +239,14 @@ func NewPoseidonHasher() *PoseidonHasher {
 	}
 }
 
+// MaxSigners returns the maximum supported signer count for PoseidonHasher.
+// Poseidon is limited to 16 field element inputs. With 3 signers and zero-length
+// messages, H1 uses ~13 elements. With 4+ signers, the encoded commitment list
+// exceeds 16 elements. Messages up to 93 bytes are supported with 3 signers.
+func (h *PoseidonHasher) MaxSigners() int {
+	return 3
+}
+
 // bn254ScalarFieldOrder is the BN254 scalar field order (Fr).
 // For Baby JubJub, this also serves as the base field modulus (Fp_BJJ = Fr_BN254),
 // since BJJ is embedded in BN254's scalar field.
@@ -295,10 +313,13 @@ func pointBytesToFieldElements(data []byte) []*big.Int {
 // order (e.g., BJJ subgroup ~251 bits), explicit modular reduction is required.
 //
 // NOTE: For BJJ subgroup (~251-bit order), simple modular reduction of a ~254-bit
-// Poseidon output introduces a ~3-bit statistical bias. This is an inherent limitation
-// of using Poseidon with BJJ, as Poseidon's field-native output cannot be expanded
-// like hash-based constructions. The bias is small enough for practical use but
-// should be documented for protocol analysis.
+// Poseidon output introduces statistical bias: values in [0, BJJ_order) are up to
+// ~8x more likely than values in [BJJ_order, BN254_order), giving a statistical
+// distance of ~7/8 from uniform. This is an inherent limitation of using Poseidon
+// with BJJ, as Poseidon's field-native output cannot be expanded like hash-based
+// constructions (which use 64-byte expansion to achieve bias < 2^-128).
+// For applications requiring full 128-bit security with BJJ, a different hash
+// construction would be needed.
 func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
 	n := new(big.Int).Set(hash)
 	order := new(big.Int).SetBytes(g.Order())
@@ -331,9 +352,14 @@ func poseidonHashChecked(elements []*big.Int) (*big.Int, error) {
 
 // H1 implements Hasher.H1 (binding factor computation).
 // Hashes: domain_H1 || msg || encCommitList || signerID as field elements.
-// Length prefixes are omitted because Poseidon operates on field elements with a
-// hard 16-element limit, and bytesToFieldElements uses fixed 31-byte chunks making
-// the element count deterministic from byte length.
+//
+// Length prefixes are omitted to conserve Poseidon's 16-element budget.
+// Boundary ambiguity between msg and encCommitList is mitigated by:
+//   - encCommitList starts with a 4-byte count prefix (always a small integer)
+//   - signerID is always exactly 32 bytes (one field element)
+//   - Domain separator provides session-level separation
+// bytesToFieldElements uses fixed 31-byte chunks, so element count is
+// deterministic from byte length.
 func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
 	elements := []*big.Int{h.domainH1}
 	elements = append(elements, bytesToFieldElements(msg)...)
@@ -367,8 +393,14 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 
 // H3 implements Hasher.H3 (nonce generation).
 // Hashes: domain_H3 || seed || rho || msg as field elements.
-// Length prefixes are omitted because Poseidon has a hard 16-element limit
-// and bytesToFieldElements uses fixed 31-byte chunks.
+//
+// Length prefixes are omitted to conserve Poseidon's 16-element budget.
+// Boundary ambiguity between seed, rho, and msg is mitigated by:
+//   - seed is always exactly 32 bytes (one field element)
+//   - rho is always exactly 32 bytes (one field element)
+//   - Domain separator provides session-level separation
+// bytesToFieldElements uses fixed 31-byte chunks, so element count is
+// deterministic from byte length.
 func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {
 	elements := []*big.Int{h.domainH3}
 	elements = append(elements, bytesToFieldElements(seed)...)
@@ -448,6 +480,12 @@ func NewRailgunHasher() *RailgunHasher {
 	return &RailgunHasher{
 		inner: NewPoseidonHasher(),
 	}
+}
+
+// MaxSigners returns the maximum supported signer count for RailgunHasher.
+// Delegates to PoseidonHasher limits since H1/H3/H4/H5 use Poseidon.
+func (h *RailgunHasher) MaxSigners() int {
+	return h.inner.MaxSigners()
 }
 
 // H1 implements Hasher.H1 (binding factor computation).

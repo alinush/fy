@@ -145,10 +145,10 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 // Equal reports whether s and b represent the same scalar value.
 func (s *Scalar) Equal(b group.Scalar) bool {
 	bScalar := assertScalar(b)
-	s.reduce()
-	// Reduce b into a temporary to avoid mutating the argument.
+	// Reduce both operands into temporaries to avoid mutating either.
+	sReduced := new(big.Int).Mod(s.inner, curveOrder)
 	bReduced := new(big.Int).Mod(bScalar.inner, curveOrder)
-	return s.inner.Cmp(bReduced) == 0
+	return sReduced.Cmp(bReduced) == 0
 }
 
 // IsZero reports whether s is the zero scalar.
@@ -309,12 +309,15 @@ func (g *BJJ) Generator() group.Point {
 // [1, curveOrder-1] using rejection sampling.
 func (g *BJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~97.6% rejection rate at 32 bytes over 251-bit order), expected ~42 iterations.
-	// 1000 limit gives negligible false failure probability.
+	// With top-5-bit masking, range is [0, 2^251). Acceptance rate ≈ order/2^251 ≈ 87%.
+	// Expected ~1.15 iterations. 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
+		// Mask top 5 bits to bring range close to 251-bit order,
+		// improving acceptance rate from ~2.4% to ~87%.
+		buf[0] &= 0x07
 		n := new(big.Int).SetBytes(buf[:])
 		if n.Cmp(curveOrder) >= 0 || n.Sign() == 0 {
 			continue // reject and retry

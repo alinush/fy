@@ -3,6 +3,7 @@ package frost
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -76,6 +77,16 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 	}
 	if total < threshold {
 		return nil, errors.New("total must be >= threshold")
+	}
+
+	// Check hasher capacity if it declares limits.
+	// Validate against threshold (the typical signing group size), not total
+	// (the number of key holders). Signing with more than MaxSigners participants
+	// at once will be caught by poseidonHashChecked at runtime.
+	if limiter, ok := hasher.(HasherLimiter); ok {
+		if max := limiter.MaxSigners(); max > 0 && threshold > max {
+			return nil, fmt.Errorf("hasher supports at most %d signers per signing session, got threshold %d", max, threshold)
+		}
 	}
 
 	return &FROST{

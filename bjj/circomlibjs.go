@@ -140,10 +140,10 @@ func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
 
 func (s *CircomScalar) Equal(b group.Scalar) bool {
 	bs := assertCircomScalar(b)
-	s.reduce()
-	// Reduce b into a temporary to avoid mutating the argument.
+	// Reduce both operands into temporaries to avoid mutating either.
+	sReduced := new(big.Int).Mod(s.inner, circSubOrder)
 	bReduced := new(big.Int).Mod(bs.inner, circSubOrder)
-	return s.inner.Cmp(bReduced) == 0
+	return sReduced.Cmp(bReduced) == 0
 }
 
 func (s *CircomScalar) IsZero() bool {
@@ -411,12 +411,15 @@ func (g *CircomBJJ) Generator() group.Point {
 
 func (g *CircomBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~97.6% rejection rate at 32 bytes over 251-bit order), expected ~42 iterations.
-	// 1000 limit gives negligible false failure probability.
+	// With top-5-bit masking, range is [0, 2^251). Acceptance rate ≈ order/2^251 ≈ 87%.
+	// Expected ~1.15 iterations. 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
+		// Mask top 5 bits to bring range close to 251-bit order,
+		// improving acceptance rate from ~2.4% to ~87%.
+		buf[0] &= 0x07
 		n := new(big.Int).SetBytes(buf[:])
 		if n.Cmp(circSubOrder) >= 0 || n.Sign() == 0 {
 			continue // reject and retry
