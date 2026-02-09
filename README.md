@@ -254,7 +254,7 @@ func main() {
     shares, _ := tw.GenerateShares(rand.Reader)
 
     // Get the circomlibjs-compatible public key (A = Y/8)
-    pkX, pkY := shares[0].SpendingPublicKey()
+    pkX, pkY, _ := shares[0].SpendingPublicKey()
 
     // Sign a message (e.g., Railgun sighash)
     message := sighash.Bytes() // 32-byte Poseidon hash

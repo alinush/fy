@@ -245,6 +245,9 @@ func (f *FROST) Aggregate(
 	if len(commitments) == 0 {
 		return nil, errors.New("no commitments provided")
 	}
+	if len(shares) != len(commitments) {
+		return nil, errors.New("shares and commitments count mismatch")
+	}
 
 	// Encode commitment list and recompute R
 	encCommitList := f.encodeCommitments(commitments)
@@ -331,6 +334,9 @@ func (f *FROST) VerifyShare(
 // This performs standard Schnorr signature verification:
 // z*G == R + c*Y, where c = H2(R, Y, message).
 func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) bool {
+	if sig == nil || sig.R == nil || sig.Z == nil || groupKey == nil {
+		return false
+	}
 	// c = H2(R, GroupKey, message)
 	c := f.hasher.H2(f.group, sig.R.Bytes(), groupKey.Bytes(), message)
 
@@ -344,10 +350,15 @@ func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) boo
 }
 
 // encodeCommitments serializes the commitment list for hashing.
-// Each field is length-prefixed with a 4-byte big-endian length to prevent
-// ambiguous concatenation boundaries.
+// The encoding is: 4-byte commitment count || for each commitment:
+//   4-byte len || ID || 4-byte len || HidingPoint || 4-byte len || BindingPoint
+// Length-prefixing prevents ambiguous concatenation boundaries (per FROST RFC).
 func (f *FROST) encodeCommitments(commitments []*SigningCommitment) []byte {
 	var commBytes []byte
+	// Prepend commitment count per FROST RFC recommendation.
+	var countBuf [4]byte
+	binary.BigEndian.PutUint32(countBuf[:], uint32(len(commitments)))
+	commBytes = append(commBytes, countBuf[:]...)
 	for _, c := range commitments {
 		commBytes = appendLengthPrefixed(commBytes, c.ID.Bytes())
 		commBytes = appendLengthPrefixed(commBytes, c.HidingPoint.Bytes())

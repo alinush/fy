@@ -282,9 +282,20 @@ func pointBytesToFieldElements(data []byte) []*big.Int {
 }
 
 // poseidonToScalar converts a Poseidon hash output to a group scalar.
+// Poseidon outputs are BN254 field elements (~254 bits). For groups with smaller
+// order (e.g., BJJ subgroup ~251 bits), explicit modular reduction is required.
 func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
+	n := new(big.Int).Set(hash)
+	order := new(big.Int).SetBytes(g.Order())
+	n.Mod(n, order)
+
 	s := g.NewScalar()
-	s.SetBytes(hash.Bytes())
+	nBytes := n.Bytes()
+	var buf [32]byte
+	copy(buf[32-len(nBytes):], nBytes)
+	if _, err := s.SetBytes(buf[:]); err != nil {
+		panic("poseidonToScalar: SetBytes failed after reduction: " + err.Error())
+	}
 	return s
 }
 
@@ -497,6 +508,12 @@ func (h *RailgunHasher) circomScalarMult(px, py, s *big.Int) (*big.Int, *big.Int
 		return result.Mod(result, fieldP)
 	}
 	fieldInv := func(a *big.Int) *big.Int {
+		// For valid BJJ points, denominators (1 ± d·x1·x2·y1·y2) are guaranteed
+		// non-zero because a·d is not a quadratic residue mod p. Panic on zero
+		// indicates a bug (invalid point input), not a runtime condition.
+		if a.Sign() == 0 {
+			panic("fieldInv: zero denominator in point arithmetic")
+		}
 		return new(big.Int).ModInverse(a, fieldP)
 	}
 

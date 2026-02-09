@@ -25,20 +25,18 @@ type InteractiveDLogProof struct {
 // dlogProveStep1 samples random commitments.
 // Returns (scalar_rand_commitment, point_rand_commitment, error)
 func dlogProveStep1() (group.Scalar, group.Point, error) {
-	// Sample a nonzero random scalar
-	var scalarRandCommitment group.Scalar
-	for {
+	// Sample a nonzero random scalar. RandomScalar already excludes zero for
+	// secp256k1 (~0% rejection rate), so this loop is defense-in-depth.
+	for attempt := 0; attempt < 1000; attempt++ {
 		s, err := RandomScalar()
 		if err != nil {
 			return nil, nil, err
 		}
 		if !s.IsZero() {
-			scalarRandCommitment = s
-			break
+			return s, ScalarBaseMult(s), nil
 		}
 	}
-	pointRandCommitment := ScalarBaseMult(scalarRandCommitment)
-	return scalarRandCommitment, pointRandCommitment, nil
+	return nil, nil, errors.New("dlogProveStep1: failed to sample nonzero scalar")
 }
 
 // dlogProveStep2 computes the response for a given challenge.
@@ -266,23 +264,20 @@ type CPProof struct {
 
 // cpProveStep1 samples random commitments for Chaum-Pedersen.
 func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments, error) {
-	// Sample a nonzero random scalar
-	var scalarRandCommitment group.Scalar
-	for {
+	// Sample a nonzero random scalar. RandomScalar already excludes zero for
+	// secp256k1 (~0% rejection rate), so this loop is defense-in-depth.
+	for attempt := 0; attempt < 1000; attempt++ {
 		s, err := RandomScalar()
 		if err != nil {
 			return nil, nil, err
 		}
 		if !s.IsZero() {
-			scalarRandCommitment = s
-			break
+			rcG := ScalarMult(baseG, s)
+			rcH := ScalarMult(baseH, s)
+			return s, &RandomCommitments{RcG: rcG, RcH: rcH}, nil
 		}
 	}
-
-	rcG := ScalarMult(baseG, scalarRandCommitment)
-	rcH := ScalarMult(baseH, scalarRandCommitment)
-
-	return scalarRandCommitment, &RandomCommitments{RcG: rcG, RcH: rcH}, nil
+	return nil, nil, errors.New("cpProveStep1: failed to sample nonzero scalar")
 }
 
 // cpProveStep2 computes the response for Chaum-Pedersen.

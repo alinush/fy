@@ -335,7 +335,9 @@ func (g *Secp256k1) Generator() group.Point {
 // [1, n-1] where n is the curve order.
 func (g *Secp256k1) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	for {
+	// For secp256k1, rejection probability is ~3.7e-39 per attempt (order ≈ 2^256).
+	// 1000 iterations is extremely generous; practically terminates on first try.
+	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
 			return nil, err
 		}
@@ -347,6 +349,7 @@ func (g *Secp256k1) RandomScalar(r io.Reader) (group.Scalar, error) {
 			return s, nil
 		}
 	}
+	return nil, errors.New("RandomScalar: rejection sampling did not converge")
 }
 
 // HashToScalar hashes the provided data to a scalar using SHA-256.

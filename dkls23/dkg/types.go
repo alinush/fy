@@ -116,13 +116,17 @@ func CommitBytes(data []byte) (dkls23.HashOutput, []byte, error) {
 	if err != nil {
 		return dkls23.HashOutput{}, nil, err
 	}
-	combined := append(data, salt...)
+	combined := make([]byte, len(data)+len(salt))
+	copy(combined, data)
+	copy(combined[len(data):], salt)
 	return dkls23.Hash(combined, nil), salt, nil
 }
 
 // VerifyCommitBytes verifies a byte commitment
 func VerifyCommitBytes(data []byte, commitment dkls23.HashOutput, salt []byte) bool {
-	combined := append(data, salt...)
+	combined := make([]byte, len(data)+len(salt))
+	copy(combined, data)
+	copy(combined[len(data):], salt)
 	computed := dkls23.Hash(combined, nil)
 	return computed == commitment
 }
