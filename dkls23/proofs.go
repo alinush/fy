@@ -119,10 +119,10 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 			totalIterations++
 			pairIterations++
 			if totalIterations > totalBudget {
-				return nil, errors.New("Fischlin proof: exceeded iteration budget")
+				return nil, errors.New("fischlin proof: exceeded iteration budget")
 			}
 			if pairIterations > perPairBudget {
-				return nil, errors.New("Fischlin proof: exceeded per-pair iteration budget")
+				return nil, errors.New("fischlin proof: exceeded per-pair iteration budget")
 			}
 			// Sample first challenge
 			firstChallenge := make([]byte, challengeBytes)
@@ -145,10 +145,10 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 				totalIterations++
 				pairIterations++
 				if totalIterations > totalBudget {
-					return nil, errors.New("Fischlin proof: exceeded iteration budget")
+					return nil, errors.New("fischlin proof: exceeded iteration budget")
 				}
 				if pairIterations > perPairBudget {
-					return nil, errors.New("Fischlin proof: exceeded per-pair iteration budget")
+					return nil, errors.New("fischlin proof: exceeded per-pair iteration budget")
 				}
 				secondChallenge := make([]byte, challengeBytes)
 				if _, err := rand.Read(secondChallenge); err != nil {
@@ -178,7 +178,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 
 	// Verify all proof pairs were found
 	if len(firstProofs) != FischlinR/2 || len(lastProofs) != FischlinR/2 {
-		return nil, errors.New("Fischlin proof: not all proof pairs found within budget")
+		return nil, errors.New("fischlin proof: not all proof pairs found within budget")
 	}
 
 	// Combine proofs
