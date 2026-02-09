@@ -3,6 +3,7 @@ package ot
 import (
 	"bytes"
 	"errors"
+	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/group"
@@ -159,8 +160,8 @@ func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutpu
 	}
 
 	// Compute chi1 and chi2 (challenges)
-	salt1 := append([]byte{1}, sessionID...)
-	salt2 := append([]byte{2}, sessionID...)
+	salt1 := slices.Concat([]byte{1}, sessionID)
+	salt2 := slices.Concat([]byte{2}, sessionID)
 	chi1Hash := dkls23.Hash(msgConcat, salt1)
 	chi2Hash := dkls23.Hash(msgConcat, salt2)
 	var chi1, chi2 FieldElement
@@ -272,8 +273,8 @@ func (s *ExtSender) Run(
 		msgConcat = append(msgConcat, data.U[i][:]...)
 	}
 
-	salt1 := append([]byte{1}, sessionID...)
-	salt2 := append([]byte{2}, sessionID...)
+	salt1 := slices.Concat([]byte{1}, sessionID)
+	salt2 := slices.Concat([]byte{2}, sessionID)
 	chi1Hash := dkls23.Hash(msgConcat, salt1)
 	chi2Hash := dkls23.Hash(msgConcat, salt2)
 	var chi1, chi2 FieldElement
@@ -369,8 +370,8 @@ func prgExpand(seed dkls23.HashOutput, index uint16, sessionID []byte) PRGOutput
 	pos := 0
 
 	for pos < ExtendedBatchSize/8 {
-		salt := append(uint16ToBytes(index), uint16ToBytes(count)...)
-		salt = append(salt, sessionID...)
+		salt := slices.Concat(uint16ToBytes(index), uint16ToBytes(count))
+		salt = slices.Concat(salt, sessionID)
 		chunk := dkls23.Hash(seed[:], salt)
 		remaining := ExtendedBatchSize/8 - pos
 		if remaining > len(chunk) {
@@ -406,7 +407,7 @@ func cutAndTranspose(input []PRGOutput) [][Kappa / 8]byte {
 }
 
 func buildSalt(j uint16, sessionID []byte, iteration uint8) []byte {
-	salt := append(uint16ToBytes(j), sessionID...)
+	salt := slices.Concat(uint16ToBytes(j), sessionID)
 	salt = append(salt, []byte("Iteration number:")...)
 	salt = append(salt, iteration)
 	return salt

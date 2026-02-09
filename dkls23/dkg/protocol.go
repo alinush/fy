@@ -2,6 +2,7 @@ package dkg
 
 import (
 	"errors"
+	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/dkls23/mta"
@@ -145,7 +146,7 @@ func Step5(params *Parameters, partyIndex uint8, sessionID []byte, proofsCommitm
 
 // Phase1 executes DKG phase 1
 func Phase1(data *SessionData) (*Phase1Output, error) {
-	if err := data.Parameters.Validate(); err != nil {
+	if err := data.ValidateSession(); err != nil {
 		return nil, err
 	}
 	polynomial, err := Step1(&data.Parameters)
@@ -379,8 +380,6 @@ func Phase4(data *SessionData, input *Phase4Input) (*sign.Party, error) {
 }
 
 func buildMulSID(receiver, sender uint8, sessionID []byte) []byte {
-	sid := []byte("Multiplication protocol")
-	sid = append(sid, receiver, sender)
-	sid = append(sid, sessionID...)
+	sid := slices.Concat([]byte("Multiplication protocol"), []byte{receiver, sender}, sessionID)
 	return sid
 }

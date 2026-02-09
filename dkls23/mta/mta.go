@@ -8,6 +8,7 @@ package mta
 import (
 	"bytes"
 	"errors"
+	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/dkls23/ot"
@@ -180,7 +181,7 @@ func (s *Sender) Run(
 	}
 
 	// Step 3: Execute OT extension
-	oteSID := append([]byte("OT Extension protocol"), sessionID...)
+	oteSID := slices.Concat([]byte("OT Extension protocol"), sessionID)
 	vectorOfV0, vectorOfTau, err := s.OTESender.Run(oteSID, OTWidth, correlations, data)
 	if err != nil {
 		return nil, nil, err
@@ -195,8 +196,8 @@ func (s *Sender) Run(
 	chiTilde := make([]group.Scalar, L)
 	chiHat := make([]group.Scalar, L)
 	for i := 0; i < L; i++ {
-		saltTilde := append([]byte{1, byte(i)}, sessionID...)
-		saltHat := append([]byte{2, byte(i)}, sessionID...)
+		saltTilde := slices.Concat([]byte{1, byte(i)}, sessionID)
+		saltHat := slices.Concat([]byte{2, byte(i)}, sessionID)
 		chiTilde[i] = dkls23.HashAsScalar(transcript, saltTilde)
 		chiHat[i] = dkls23.HashAsScalar(transcript, saltHat)
 	}
@@ -264,7 +265,7 @@ func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceive
 	}
 
 	// Step 3: Start OT extension
-	oteSID := append([]byte("OT Extension protocol"), sessionID...)
+	oteSID := slices.Concat([]byte("OT Extension protocol"), sessionID)
 	extendedSeeds, dataToSender, err := r.OTEReceiver.RunPhase1(oteSID, choiceBits)
 	if err != nil {
 		return nil, nil, nil, err
@@ -275,8 +276,8 @@ func (r *Receiver) RunPhase1(sessionID []byte) (group.Scalar, *DataToKeepReceive
 	chiTilde := make([]group.Scalar, L)
 	chiHat := make([]group.Scalar, L)
 	for i := 0; i < L; i++ {
-		saltTilde := append([]byte{1, byte(i)}, sessionID...)
-		saltHat := append([]byte{2, byte(i)}, sessionID...)
+		saltTilde := slices.Concat([]byte{1, byte(i)}, sessionID)
+		saltHat := slices.Concat([]byte{2, byte(i)}, sessionID)
 		chiTilde[i] = dkls23.HashAsScalar(transcript, saltTilde)
 		chiHat[i] = dkls23.HashAsScalar(transcript, saltHat)
 	}
@@ -300,7 +301,7 @@ func (r *Receiver) RunPhase2(
 	dataReceived *DataToReceiver,
 ) ([]group.Scalar, error) {
 	// Step 3 (Conclusion): Finish OT extension
-	oteSID := append([]byte("OT Extension protocol"), sessionID...)
+	oteSID := slices.Concat([]byte("OT Extension protocol"), sessionID)
 	otOutputs, err := r.OTEReceiver.RunPhase2(
 		oteSID,
 		OTWidth,

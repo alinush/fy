@@ -57,7 +57,7 @@ func (s *Sender) Phase1() *dkls23.DLogProof {
 // Phase2 processes the receiver's data and computes the two output messages
 func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof) (m0, m1 dkls23.HashOutput, err error) {
 	// Reconstruct h from the seed
-	msgForH := append([]byte("Receiver"), seed[:]...)
+	msgForH := slices.Concat([]byte("Receiver"), seed[:])
 	hScalar := dkls23.HashAsScalar(msgForH, sessionID)
 	h := dkls23.ScalarBaseMult(hScalar)
 
@@ -81,8 +81,8 @@ func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof)
 	valueForM0 := dkls23.ScalarMult(v, s.S)
 	valueForM1 := dkls23.ScalarMult(dkls23.PointSub(v, h), s.S)
 
-	msgForM0 := append([]byte("Sender"), dkls23.PointToBytes(valueForM0)...)
-	msgForM1 := append([]byte("Sender"), dkls23.PointToBytes(valueForM1)...)
+	msgForM0 := slices.Concat([]byte("Sender"), dkls23.PointToBytes(valueForM0))
+	msgForM1 := slices.Concat([]byte("Sender"), dkls23.PointToBytes(valueForM1))
 
 	m0 = dkls23.Hash(msgForM0, sessionID)
 	m1 = dkls23.Hash(msgForM1, sessionID)
@@ -98,7 +98,7 @@ func (s *Sender) Phase2Batch(sessionID []byte, seed *Seed, encProofs []*dkls23.E
 
 	for i := 0; i < batchSize; i++ {
 		// Use different session IDs for different iterations
-		currentSID := append(uint16ToBytes(uint16(i)), sessionID...)
+		currentSID := slices.Concat(uint16ToBytes(uint16(i)), sessionID)
 
 		m0, m1, err := s.Phase2(currentSID, seed, encProofs[i])
 		if err != nil {
@@ -157,7 +157,7 @@ func (r *Receiver) Phase1Batch(sessionID []byte, bits []bool) ([]group.Scalar, [
 
 	for i := 0; i < batchSize; i++ {
 		// Use different session IDs for different iterations
-		currentSID := append(uint16ToBytes(uint16(i)), sessionID...)
+		currentSID := slices.Concat(uint16ToBytes(uint16(i)), sessionID)
 
 		var err error
 		vecR[i], vecProof[i], err = r.Phase1(currentSID, bits[i])
@@ -182,7 +182,7 @@ func (r *Receiver) Phase2Step1(sessionID []byte, dlogProof *dkls23.DLogProof) (g
 func (r *Receiver) Phase2Step2(sessionID []byte, rScalar group.Scalar, z group.Point) dkls23.HashOutput {
 	// Compute m_b = H("Sender" || r * z)
 	valueForMb := dkls23.ScalarMult(z, rScalar)
-	msgForMb := append([]byte("Sender"), dkls23.PointToBytes(valueForMb)...)
+	msgForMb := slices.Concat([]byte("Sender"), dkls23.PointToBytes(valueForMb))
 	return dkls23.Hash(msgForMb, sessionID)
 }
 
@@ -200,7 +200,7 @@ func (r *Receiver) Phase2Batch(sessionID []byte, vecR []group.Scalar, dlogProof 
 
 	for i := 0; i < batchSize; i++ {
 		// Use different session IDs for different iterations
-		currentSID := append(uint16ToBytes(uint16(i)), sessionID...)
+		currentSID := slices.Concat(uint16ToBytes(uint16(i)), sessionID)
 		vecMb[i] = r.Phase2Step2(currentSID, vecR[i], z)
 	}
 

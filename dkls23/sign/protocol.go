@@ -378,7 +378,7 @@ var secp256k1OrderValue = func() *big.Int {
 }()
 
 func secp256k1Order() *big.Int {
-	return secp256k1OrderValue
+	return new(big.Int).Set(secp256k1OrderValue)
 }
 
 func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s group.Scalar) bool {

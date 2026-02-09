@@ -146,12 +146,14 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 func (s *Scalar) Equal(b group.Scalar) bool {
 	bScalar := assertScalar(b)
 	s.reduce()
-	bScalar.reduce()
-	return s.inner.Cmp(bScalar.inner) == 0
+	// Reduce b into a temporary to avoid mutating the argument.
+	bReduced := new(big.Int).Mod(bScalar.inner, curveOrder)
+	return s.inner.Cmp(bReduced) == 0
 }
 
 // IsZero reports whether s is the zero scalar.
 func (s *Scalar) IsZero() bool {
+	s.reduce()
 	return s.inner.Sign() == 0
 }
 
@@ -307,7 +309,7 @@ func (g *BJJ) Generator() group.Point {
 // [1, curveOrder-1] using rejection sampling.
 func (g *BJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~96.9% rejection rate at 32 bytes over 251-bit order), expected ~32 iterations.
+	// For BJJ (~97.6% rejection rate at 32 bytes over 251-bit order), expected ~42 iterations.
 	// 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {

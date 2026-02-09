@@ -213,7 +213,10 @@ func (p *Participant) ProcessRound1(input *Round1Input) (*DKGResult, error) {
 		// The first commitment (index 0) is the public key for that participant
 		// Actually, individual public keys would need to be computed from the key shares
 		// For now, we just store the constant term commitment
-		id := scalarToInt(b.ID)
+		id, err := scalarToInt(b.ID)
+		if err != nil {
+			return nil, fmt.Errorf("invalid participant ID: %w", err)
+		}
 		allPublicKeys[id] = b.Commitments[0]
 	}
 
@@ -234,10 +237,10 @@ func (p *Participant) SetKeyShare(ks *frost.KeyShare) {
 // scalarToInt extracts the integer value from a scalar.
 // This assumes the scalar represents a small integer (participant ID).
 // Reads the last 4 bytes as a big-endian uint32 to support IDs up to 2^32-1.
-func scalarToInt(s group.Scalar) int {
+func scalarToInt(s group.Scalar) (int, error) {
 	b := s.Bytes()
 	if len(b) == 0 {
-		return 0
+		return 0, nil
 	}
 	// Verify no significant bytes beyond the last 4 (participant IDs should be small)
 	start := len(b) - 4
@@ -246,7 +249,7 @@ func scalarToInt(s group.Scalar) int {
 	}
 	for i := 0; i < start; i++ {
 		if b[i] != 0 {
-			panic("scalarToInt: scalar value exceeds uint32 range (invalid participant ID)")
+			return 0, fmt.Errorf("scalarToInt: scalar value exceeds uint32 range (invalid participant ID)")
 		}
 	}
 	// Read up to the last 4 bytes as big-endian
@@ -254,5 +257,5 @@ func scalarToInt(s group.Scalar) int {
 	for _, v := range b[start:] {
 		n = n<<8 | int(v)
 	}
-	return n
+	return n, nil
 }

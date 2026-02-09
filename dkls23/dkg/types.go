@@ -28,6 +28,17 @@ func (p *Parameters) Validate() error {
 	return nil
 }
 
+// ValidateSession checks that the session data is valid.
+func (s *SessionData) ValidateSession() error {
+	if err := s.Parameters.Validate(); err != nil {
+		return err
+	}
+	if s.PartyIndex < 1 || s.PartyIndex > s.Parameters.ShareCount {
+		return errors.New("party index must be between 1 and share count")
+	}
+	return nil
+}
+
 // SessionData contains data for a DKG session
 type SessionData struct {
 	Parameters Parameters

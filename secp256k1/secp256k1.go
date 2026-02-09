@@ -119,24 +119,16 @@ func (s *Scalar) Bytes() []byte {
 }
 
 // SetBytes sets s from a big-endian byte slice and returns s.
-// For inputs >= 32 bytes, only the first 32 bytes are used (silent truncation).
-// For inputs < 32 bytes, the value is right-aligned (zero-padded on the left).
+// Inputs must be at most 32 bytes; the value is right-aligned (zero-padded on the left).
 // The 32-byte value is then reduced modulo the curve order by dcrd's SetBytes.
-//
-// WARNING: Inputs > 32 bytes are silently truncated, NOT reduced modulo order.
 // Callers needing modular reduction of larger values (e.g., hash-to-field with
 // 64-byte expansion) must pre-reduce via big.Int before calling SetBytes.
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
-	if len(data) > 64 {
-		return nil, errors.New("scalar input exceeds 64 bytes")
+	if len(data) > 32 {
+		return nil, errors.New("scalar input exceeds 32 bytes; use big.Int reduction for larger values")
 	}
-	// Pad or truncate to 32 bytes
 	var bytes [32]byte
-	if len(data) >= 32 {
-		copy(bytes[:], data[:32])
-	} else {
-		copy(bytes[32-len(data):], data)
-	}
+	copy(bytes[32-len(data):], data)
 	// SetBytes returns overflow flag but we want to reduce mod n
 	s.inner.SetBytes(&bytes)
 	return s, nil

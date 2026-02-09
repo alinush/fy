@@ -224,6 +224,13 @@ func (p *DLogProof) Verify(sessionID []byte) bool {
 		seen[key] = true
 	}
 
+	// Reject identity points in random commitments
+	for _, rc := range p.RandCommitments {
+		if IsIdentity(rc) {
+			return false
+		}
+	}
+
 	// Verify each pair
 	for i := 0; i < FischlinR/2; i++ {
 		// Compute first hash
@@ -460,6 +467,12 @@ func (p *EncProof) Verify(sessionID []byte) bool {
 		return false
 	}
 
+	// Reject identity commitment points (could indicate a forged proof)
+	if IsIdentity(p.Commitments0.RcG) || IsIdentity(p.Commitments0.RcH) ||
+		IsIdentity(p.Commitments1.RcG) || IsIdentity(p.Commitments1.RcH) {
+		return false
+	}
+
 	// Check proof0.PointU == proof1.PointU + H
 	expectedU := PointAdd(p.Proof1.PointU, p.Proof1.BaseH)
 	if !PointEqual(p.Proof0.PointU, expectedU) {
@@ -624,6 +637,10 @@ func DeserializeDLogProof(data []byte) (*DLogProof, error) {
 		}
 		challengeLen := int(binary.BigEndian.Uint16(data[offset:]))
 		offset += 2
+		// FischlinT/8 = 4 bytes is the expected challenge length
+		if challengeLen > FischlinT/8 {
+			return nil, ErrInvalidProof
+		}
 		if offset+challengeLen > len(data) {
 			return nil, ErrInvalidProof
 		}

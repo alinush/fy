@@ -141,11 +141,13 @@ func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
 func (s *CircomScalar) Equal(b group.Scalar) bool {
 	bs := assertCircomScalar(b)
 	s.reduce()
-	bs.reduce()
-	return s.inner.Cmp(bs.inner) == 0
+	// Reduce b into a temporary to avoid mutating the argument.
+	bReduced := new(big.Int).Mod(bs.inner, circSubOrder)
+	return s.inner.Cmp(bReduced) == 0
 }
 
 func (s *CircomScalar) IsZero() bool {
+	s.reduce()
 	return s.inner.Sign() == 0
 }
 
@@ -272,7 +274,7 @@ func (p *CircomPoint) ScalarMult(s group.Scalar, q group.Point) group.Point {
 	r1.x = new(big.Int).Set(qp.x)
 	r1.y = new(big.Int).Set(qp.y)
 
-	n := new(big.Int).Set(scalar.inner)
+	n := new(big.Int).Mod(scalar.inner, circSubOrder)
 	// Use fixed bit-width to prevent timing leaks from variable iteration count.
 	// circSubOrder.BitLen() is constant (251 bits for BJJ subgroup order).
 	fixedBits := circSubOrder.BitLen()
@@ -409,7 +411,7 @@ func (g *CircomBJJ) Generator() group.Point {
 
 func (g *CircomBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~96.9% rejection rate at 32 bytes over 251-bit order), expected ~32 iterations.
+	// For BJJ (~97.6% rejection rate at 32 bytes over 251-bit order), expected ~42 iterations.
 	// 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {

@@ -3,6 +3,7 @@ package frost
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"hash"
 	"math"
 	"math/big"
@@ -292,6 +293,12 @@ func pointBytesToFieldElements(data []byte) []*big.Int {
 // poseidonToScalar converts a Poseidon hash output to a group scalar.
 // Poseidon outputs are BN254 field elements (~254 bits). For groups with smaller
 // order (e.g., BJJ subgroup ~251 bits), explicit modular reduction is required.
+//
+// NOTE: For BJJ subgroup (~251-bit order), simple modular reduction of a ~254-bit
+// Poseidon output introduces a ~3-bit statistical bias. This is an inherent limitation
+// of using Poseidon with BJJ, as Poseidon's field-native output cannot be expanded
+// like hash-based constructions. The bias is small enough for practical use but
+// should be documented for protocol analysis.
 func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
 	n := new(big.Int).Set(hash)
 	order := new(big.Int).SetBytes(g.Order())
@@ -307,6 +314,21 @@ func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
 	return s
 }
 
+// poseidonHashChecked validates input count before calling poseidon.Hash.
+// Poseidon supports at most 16 field element inputs. If this limit is exceeded,
+// it indicates a bug in element construction (e.g., input too large for the
+// fixed 31-byte chunking scheme). The element count is deterministic from byte
+// lengths, so callers can document their maximum supported sizes.
+func poseidonHashChecked(elements []*big.Int) (*big.Int, error) {
+	if len(elements) > 16 {
+		return nil, fmt.Errorf("poseidon input has %d elements, maximum is 16", len(elements))
+	}
+	if len(elements) == 0 {
+		return nil, fmt.Errorf("poseidon input is empty")
+	}
+	return poseidon.Hash(elements)
+}
+
 // H1 implements Hasher.H1 (binding factor computation).
 // Hashes: domain_H1 || msg || encCommitList || signerID as field elements.
 // Length prefixes are omitted because Poseidon operates on field elements with a
@@ -318,7 +340,7 @@ func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) 
 	elements = append(elements, bytesToFieldElements(encCommitList)...)
 	elements = append(elements, new(big.Int).SetBytes(signerID))
 
-	hash, err := poseidon.Hash(elements)
+	hash, err := poseidonHashChecked(elements)
 	if err != nil {
 		// This should never happen with valid inputs
 		panic("poseidon hash failed: " + err.Error())
@@ -335,7 +357,7 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	elements = append(elements, pointBytesToFieldElements(Y)...)
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidon.Hash(elements)
+	hash, err := poseidonHashChecked(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -353,7 +375,7 @@ func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {
 	elements = append(elements, bytesToFieldElements(rho)...)
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidon.Hash(elements)
+	hash, err := poseidonHashChecked(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -367,7 +389,7 @@ func (h *PoseidonHasher) H4(g group.Group, msg []byte) []byte {
 	elements := []*big.Int{h.domainH4}
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidon.Hash(elements)
+	hash, err := poseidonHashChecked(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -388,7 +410,7 @@ func (h *PoseidonHasher) H5(g group.Group, encCommitList []byte) []byte {
 	elements := []*big.Int{h.domainH5}
 	elements = append(elements, bytesToFieldElements(encCommitList)...)
 
-	hash, err := poseidon.Hash(elements)
+	hash, err := poseidonHashChecked(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -465,7 +487,7 @@ func (h *RailgunHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	ay.Mod(ay, bn254ScalarFieldOrder)
 
 	// Compute challenge exactly as circomlibjs: poseidon([R.x, R.y, A.x, A.y, msg])
-	hash, err := poseidon.Hash([]*big.Int{rx, ry, ax, ay, msgInt})
+	hash, err := poseidonHashChecked([]*big.Int{rx, ry, ax, ay, msgInt})
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
