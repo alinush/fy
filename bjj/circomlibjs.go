@@ -18,7 +18,7 @@ import (
 // This matches the parameters used by @railgun-community/circomlibjs.
 
 var (
-	// Field modulus (BN254 base field)
+	// fieldP is the Baby JubJub base field modulus, which equals the BN254 scalar field (Fr).
 	fieldP, _ = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
 
 	// Curve parameters (circomlibjs)
@@ -140,6 +140,8 @@ func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
 
 func (s *CircomScalar) Equal(b group.Scalar) bool {
 	bs := assertCircomScalar(b)
+	s.reduce()
+	bs.reduce()
 	return s.inner.Cmp(bs.inner) == 0
 }
 
@@ -251,10 +253,11 @@ func (p *CircomPoint) Negate(a group.Point) group.Point {
 // The loop always executes circSubOrder.BitLen() iterations (251 for BJJ) regardless
 // of the scalar value, preventing timing leaks from variable iteration count.
 //
-// NOTE: This provides structural constant-time (same operation count per iteration)
-// but NOT microarchitectural constant-time, because math/big operations have
-// data-dependent timing. For secret scalars requiring full constant-time guarantees,
-// use bjj.Point.ScalarMult (which delegates to gnark-crypto) instead.
+// WARNING: This is NOT safe for secret scalars. The if/else branch on scalar bits
+// leaks through branch prediction side channels, and math/big operations have
+// data-dependent timing. For secret scalar multiplication, use bjj.Point.ScalarMult
+// (which delegates to gnark-crypto's constant-time implementation) instead.
+// This function is used only for public scalar operations (DivBy8, IsInSubgroup).
 func (p *CircomPoint) ScalarMult(s group.Scalar, q group.Point) group.Point {
 	scalar := assertCircomScalar(s)
 	qp := assertCircomPoint(q)
@@ -406,7 +409,7 @@ func (g *CircomBJJ) Generator() group.Point {
 
 func (g *CircomBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// For BJJ (~96.9% rejection rate at 32 bytes over 251-bit order), expected ~32 iterations.
 	// 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {

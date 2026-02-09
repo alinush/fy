@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"math"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -42,6 +43,17 @@ type SignatureShare struct {
 
 	// Z is the signature share value.
 	Z group.Scalar
+}
+
+// validateCommitments checks that no commitment contains an identity point.
+// Per RFC 9591 Section 4.3, identity commitment points must be rejected.
+func validateCommitments(commitments []*SigningCommitment) error {
+	for _, c := range commitments {
+		if c.HidingPoint.IsIdentity() || c.BindingPoint.IsIdentity() {
+			return errors.New("commitment contains identity point")
+		}
+	}
+	return nil
 }
 
 // SignRound1 generates fresh nonces and a public commitment for a signing
@@ -95,6 +107,20 @@ func (f *FROST) SignRound2(
 	if len(commitments) < f.threshold {
 		return nil, errors.New("not enough commitments to meet threshold")
 	}
+	if err := validateCommitments(commitments); err != nil {
+		return nil, err
+	}
+
+	// Check for consumed nonces
+	if nonce.D == nil || nonce.D.IsZero() || nonce.E == nil || nonce.E.IsZero() {
+		return nil, errors.New("nonce already consumed or invalid")
+	}
+
+	// Zero out nonce values on exit
+	defer func() {
+		nonce.D = f.group.NewScalar() // zero
+		nonce.E = f.group.NewScalar() // zero
+	}()
 
 	// Check for duplicate signer IDs and verify own commitment is present
 	seen := make(map[string]bool)
@@ -169,6 +195,9 @@ func (f *FROST) ComputeGroupCommitment(message []byte, commitments []*SigningCom
 	if len(commitments) == 0 {
 		return nil, ErrInvalidCommitment
 	}
+	if err := validateCommitments(commitments); err != nil {
+		return nil, err
+	}
 
 	// Encode commitment list for binding factor computation
 	encCommitList := f.encodeCommitments(commitments)
@@ -210,6 +239,9 @@ func (f *FROST) AggregateWithVerification(
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
 	}
+	if err := validateCommitments(commitments); err != nil {
+		return nil, err
+	}
 
 	// Verify each share before aggregation
 	for _, share := range shares {
@@ -248,6 +280,9 @@ func (f *FROST) Aggregate(
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
 	}
+	if err := validateCommitments(commitments); err != nil {
+		return nil, err
+	}
 
 	// Encode commitment list and recompute R
 	encCommitList := f.encodeCommitments(commitments)
@@ -282,6 +317,10 @@ func (f *FROST) VerifyShare(
 	commitments []*SigningCommitment,
 	groupKey group.Point,
 ) (bool, error) {
+	if err := validateCommitments(commitments); err != nil {
+		return false, err
+	}
+
 	// Encode commitment list for binding factor computation
 	encCommitList := f.encodeCommitments(commitments)
 	bindingFactors := f.computeBindingFactors(message, encCommitList, commitments)
@@ -369,6 +408,9 @@ func (f *FROST) encodeCommitments(commitments []*SigningCommitment) []byte {
 
 // appendLengthPrefixed appends a 4-byte big-endian length prefix followed by data to dst.
 func appendLengthPrefixed(dst, data []byte) []byte {
+	if len(data) > math.MaxUint32 {
+		panic("appendLengthPrefixed: data length exceeds uint32 max")
+	}
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
 	dst = append(dst, lenBuf[:]...)

@@ -127,6 +127,9 @@ func (s *Scalar) Bytes() []byte {
 // Callers needing modular reduction of larger values (e.g., hash-to-field with
 // 64-byte expansion) must pre-reduce via big.Int before calling SetBytes.
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
+	if len(data) > 64 {
+		return nil, errors.New("scalar input exceeds 64 bytes")
+	}
 	// Pad or truncate to 32 bytes
 	var bytes [32]byte
 	if len(data) >= 32 {
@@ -155,6 +158,9 @@ func (s *Scalar) IsZero() bool {
 // point arithmetic.
 //
 // The identity element is the point at infinity.
+//
+// Point methods are NOT safe for concurrent use. Bytes() and Equal()
+// convert to affine coordinates in-place, mutating the receiver.
 type Point struct {
 	inner secp256k1.JacobianPoint
 }

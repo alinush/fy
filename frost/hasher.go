@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"hash"
+	"math"
 	"math/big"
 
 	"github.com/f3rmion/fy/group"
@@ -14,6 +15,9 @@ import (
 // writeLengthPrefixed writes a 4-byte big-endian length prefix followed by the data.
 // This prevents hash collision attacks from ambiguous concatenation boundaries.
 func writeLengthPrefixed(h hash.Hash, data []byte) {
+	if len(data) > math.MaxUint32 {
+		panic("writeLengthPrefixed: data length exceeds uint32 max")
+	}
 	var lenBuf [4]byte
 	binary.BigEndian.PutUint32(lenBuf[:], uint32(len(data)))
 	h.Write(lenBuf[:])
@@ -97,7 +101,7 @@ func (h *SHA256Hasher) H1(g group.Group, msg, encCommitList, signerID []byte) gr
 
 // H2 implements Hasher.H2.
 func (h *SHA256Hasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
-	return h.hashToScalar(g, R, Y, msg)
+	return h.hashToScalar(g, []byte("chal"), R, Y, msg)
 }
 
 // H3 implements Hasher.H3.
@@ -224,8 +228,10 @@ func NewPoseidonHasher() *PoseidonHasher {
 	}
 }
 
-// bn254ScalarFieldOrder is the order of the BN254 scalar field.
-// All Poseidon inputs must be less than this value.
+// bn254ScalarFieldOrder is the BN254 scalar field order (Fr).
+// For Baby JubJub, this also serves as the base field modulus (Fp_BJJ = Fr_BN254),
+// since BJJ is embedded in BN254's scalar field.
+// All Poseidon hash inputs must be less than this value.
 var bn254ScalarFieldOrder = func() *big.Int {
 	order, _ := new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
 	return order
@@ -270,9 +276,11 @@ func bytesToFieldElements(data []byte) []*big.Int {
 func pointBytesToFieldElements(data []byte) []*big.Int {
 	if len(data) == 64 {
 		// Uncompressed point: X || Y (32 bytes each)
-		// Each coordinate is already < field order (BN254 base field)
+		// Reduce coordinates modulo field order for safety
 		x := new(big.Int).SetBytes(data[0:32])
 		y := new(big.Int).SetBytes(data[32:64])
+		x.Mod(x, bn254ScalarFieldOrder)
+		y.Mod(y, bn254ScalarFieldOrder)
 		return []*big.Int{x, y}
 	}
 	// Compressed or other format: reduce modulo field order
@@ -301,6 +309,9 @@ func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
 
 // H1 implements Hasher.H1 (binding factor computation).
 // Hashes: domain_H1 || msg || encCommitList || signerID as field elements.
+// Length prefixes are omitted because Poseidon operates on field elements with a
+// hard 16-element limit, and bytesToFieldElements uses fixed 31-byte chunks making
+// the element count deterministic from byte length.
 func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
 	elements := []*big.Int{h.domainH1}
 	elements = append(elements, bytesToFieldElements(msg)...)
@@ -334,6 +345,8 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 
 // H3 implements Hasher.H3 (nonce generation).
 // Hashes: domain_H3 || seed || rho || msg as field elements.
+// Length prefixes are omitted because Poseidon has a hard 16-element limit
+// and bytesToFieldElements uses fixed 31-byte chunks.
 func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {
 	elements := []*big.Int{h.domainH3}
 	elements = append(elements, bytesToFieldElements(seed)...)
@@ -487,7 +500,8 @@ func (h *RailgunHasher) extractPkCoordinatesDiv8(g group.Group, data []byte) (*b
 // circomScalarMult performs scalar multiplication on the circomlibjs Baby JubJub curve.
 // Computes s * P where P = (px, py) is a point on the curve with A=168700, D=168696.
 func (h *RailgunHasher) circomScalarMult(px, py, s *big.Int) (*big.Int, *big.Int) {
-	// Field modulus (BN254 base field)
+	// fieldP is the Baby JubJub base field modulus, which equals the BN254 scalar field (Fr).
+	// BJJ is defined as a twisted Edwards curve embedded in BN254's scalar field.
 	fieldP, _ := new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
 
 	// Curve parameters (circomlibjs)
@@ -594,15 +608,8 @@ func (h *RailgunHasher) extractPointCoordinates(g group.Group, data []byte) (*bi
 		return x, y
 	}
 
-	// Fallback: try to get bytes and hope they're uncompressed
-	pb := p.Bytes()
-	if len(pb) >= 64 {
-		x := new(big.Int).SetBytes(pb[0:32])
-		y := new(big.Int).SetBytes(pb[32:64])
-		return x, y
-	}
-
-	panic("cannot extract coordinates from point")
+	// Compressed format requires UncompressedBytes interface
+	panic("extractPointCoordinates: group.Point does not implement UncompressedBytes()")
 }
 
 // H3 implements Hasher.H3 (nonce generation).

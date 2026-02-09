@@ -108,13 +108,20 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 	// Expected iterations: ~32 pairs * ~256 trials/pair = ~8,192.
 	// Budget of 1M (~122x expected) ensures negligible false failure probability.
 	const totalBudget = 1_000_000
+	// Per-pair budget prevents adversarial session IDs from front-loading iterations
+	const perPairBudget = totalBudget / (FischlinR / 2) // ~31,250 per pair
 	totalIterations := 0
 	for i := 0; i < FischlinR/2; i++ {
 		var flag bool
+		pairIterations := 0
 		for firstCounter := 0; firstCounter < 65535 && !flag; firstCounter++ {
 			totalIterations++
+			pairIterations++
 			if totalIterations > totalBudget {
 				return nil, errors.New("Fischlin proof: exceeded iteration budget")
+			}
+			if pairIterations > perPairBudget {
+				return nil, errors.New("Fischlin proof: exceeded per-pair iteration budget")
 			}
 			// Sample first challenge
 			firstChallenge := make([]byte, challengeBytes)
@@ -138,8 +145,12 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 			// Search for matching second challenge
 			for secondCounter := 0; secondCounter < 65535; secondCounter++ {
 				totalIterations++
+				pairIterations++
 				if totalIterations > totalBudget {
 					return nil, errors.New("Fischlin proof: exceeded iteration budget")
+				}
+				if pairIterations > perPairBudget {
+					return nil, errors.New("Fischlin proof: exceeded per-pair iteration budget")
 				}
 				secondChallenge := make([]byte, challengeBytes)
 				if _, err := rand.Read(secondChallenge); err != nil {
@@ -189,6 +200,11 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 func (p *DLogProof) Verify(sessionID []byte) bool {
 	// Check lengths
 	if len(p.RandCommitments) != FischlinR || len(p.Proofs) != FischlinR {
+		return false
+	}
+
+	// Reject proofs for the identity point (knowledge of s=0 is trivial)
+	if IsIdentity(p.Point) {
 		return false
 	}
 
@@ -439,6 +455,11 @@ func (p *EncProof) Verify(sessionID []byte) bool {
 		return false
 	}
 
+	// Reject proofs with identity points (would break OT security)
+	if IsIdentity(p.Proof0.BaseH) || IsIdentity(p.Proof0.PointV) || IsIdentity(p.Proof0.PointU) || IsIdentity(p.Proof1.PointU) {
+		return false
+	}
+
 	// Check proof0.PointU == proof1.PointU + H
 	expectedU := PointAdd(p.Proof1.PointU, p.Proof1.BaseH)
 	if !PointEqual(p.Proof0.PointU, expectedU) {
@@ -561,6 +582,9 @@ func DeserializeDLogProof(data []byte) (*DLogProof, error) {
 	}
 	rcCount := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
+	if rcCount != FischlinR {
+		return nil, ErrInvalidProof
+	}
 
 	p.RandCommitments = make([]group.Point, rcCount)
 	for i := 0; i < rcCount; i++ {
@@ -586,6 +610,9 @@ func DeserializeDLogProof(data []byte) (*DLogProof, error) {
 	}
 	proofCount := int(binary.BigEndian.Uint16(data[offset:]))
 	offset += 2
+	if proofCount != FischlinR {
+		return nil, ErrInvalidProof
+	}
 
 	p.Proofs = make([]*InteractiveDLogProof, proofCount)
 	for i := 0; i < proofCount; i++ {

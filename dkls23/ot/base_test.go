@@ -1,6 +1,7 @@
 package ot
 
 import (
+	"slices"
 	"testing"
 
 	"github.com/f3rmion/fy/dkls23"
@@ -23,7 +24,7 @@ func TestDLogProof(t *testing.T) {
 	proof := sender.Phase1()
 
 	// Verify the proof
-	sid := append(sessionID, []byte("DLogProof")...)
+	sid := slices.Concat(sessionID, []byte("DLogProof"))
 	if !proof.Verify(sid) {
 		t.Error("DLogProof verification failed")
 	}
@@ -50,7 +51,7 @@ func TestEncProof(t *testing.T) {
 		t.Fatalf("Phase1 bit=false failed: %v", err)
 	}
 
-	sid := append(sessionID, []byte("EncProof")...)
+	sid := slices.Concat(sessionID, []byte("EncProof"))
 	if !proof0.Verify(sid) {
 		t.Error("EncProof verification failed for bit=false")
 	}

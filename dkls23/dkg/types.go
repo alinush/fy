@@ -3,6 +3,8 @@
 package dkg
 
 import (
+	"errors"
+
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/dkls23/ot"
 	"github.com/f3rmion/fy/dkls23/sign"
@@ -13,6 +15,17 @@ import (
 type Parameters struct {
 	Threshold  uint8
 	ShareCount uint8
+}
+
+// Validate checks that the DKG parameters are valid.
+func (p *Parameters) Validate() error {
+	if p.Threshold < 2 {
+		return errors.New("threshold must be at least 2")
+	}
+	if p.ShareCount < p.Threshold {
+		return errors.New("share count must be >= threshold")
+	}
+	return nil
 }
 
 // SessionData contains data for a DKG session

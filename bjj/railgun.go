@@ -70,7 +70,7 @@ func (g *RailgunBJJ) Generator() group.Point {
 // [1, curveOrder-1] using rejection sampling.
 func (g *RailgunBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// For BJJ (~96.9% rejection rate at 32 bytes over 251-bit order), expected ~32 iterations.
 	// 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {

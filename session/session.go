@@ -239,12 +239,18 @@ func scalarToInt(s group.Scalar) int {
 	if len(b) == 0 {
 		return 0
 	}
-	// Read up to the last 4 bytes as big-endian
-	n := 0
+	// Verify no significant bytes beyond the last 4 (participant IDs should be small)
 	start := len(b) - 4
 	if start < 0 {
 		start = 0
 	}
+	for i := 0; i < start; i++ {
+		if b[i] != 0 {
+			panic("scalarToInt: scalar value exceeds uint32 range (invalid participant ID)")
+		}
+	}
+	// Read up to the last 4 bytes as big-endian
+	n := 0
 	for _, v := range b[start:] {
 		n = n<<8 | int(v)
 	}

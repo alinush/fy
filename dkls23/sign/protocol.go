@@ -369,9 +369,16 @@ func computeLagrangeCoeff(partyIndex uint8, counterparties []uint8) (group.Scala
 	return dkls23.ScalarMul(numerator, denomInv), nil
 }
 
-func secp256k1Order() *big.Int {
-	n, _ := new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+var secp256k1OrderValue = func() *big.Int {
+	n, ok := new(big.Int).SetString("FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141", 16)
+	if !ok {
+		panic("failed to parse secp256k1 order")
+	}
 	return n
+}()
+
+func secp256k1Order() *big.Int {
+	return secp256k1OrderValue
 }
 
 func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s group.Scalar) bool {

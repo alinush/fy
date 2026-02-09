@@ -145,6 +145,9 @@ func Step5(params *Parameters, partyIndex uint8, sessionID []byte, proofsCommitm
 
 // Phase1 executes DKG phase 1
 func Phase1(data *SessionData) (*Phase1Output, error) {
+	if err := data.Parameters.Validate(); err != nil {
+		return nil, err
+	}
 	polynomial, err := Step1(&data.Parameters)
 	if err != nil {
 		return nil, err

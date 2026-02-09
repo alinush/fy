@@ -145,6 +145,8 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 // Equal reports whether s and b represent the same scalar value.
 func (s *Scalar) Equal(b group.Scalar) bool {
 	bScalar := assertScalar(b)
+	s.reduce()
+	bScalar.reduce()
 	return s.inner.Cmp(bScalar.inner) == 0
 }
 
@@ -305,7 +307,7 @@ func (g *BJJ) Generator() group.Point {
 // [1, curveOrder-1] using rejection sampling.
 func (g *BJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 	var buf [32]byte
-	// For BJJ (~87.5% rejection rate at 32 bytes), expected ~8 iterations.
+	// For BJJ (~96.9% rejection rate at 32 bytes over 251-bit order), expected ~32 iterations.
 	// 1000 limit gives negligible false failure probability.
 	for attempt := 0; attempt < 1000; attempt++ {
 		if _, err := io.ReadFull(r, buf[:]); err != nil {
