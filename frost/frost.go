@@ -97,6 +97,18 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 	}, nil
 }
 
+// validateSignerCount checks if the number of signers exceeds the hasher's capacity.
+// This prevents Poseidon-based hashers from panicking at runtime when the encoded
+// commitment list exceeds the 16-element input limit.
+func (f *FROST) validateSignerCount(n int) error {
+	if limiter, ok := f.hasher.(HasherLimiter); ok {
+		if max := limiter.MaxSigners(); max > 0 && n > max {
+			return fmt.Errorf("too many signers (%d), hasher supports at most %d", n, max)
+		}
+	}
+	return nil
+}
+
 // scalarFromInt creates a scalar from a non-negative integer value.
 // Supports values up to 2^32-1 (encoded as big-endian in a 32-byte buffer).
 // Panics if n is negative (programmer error).

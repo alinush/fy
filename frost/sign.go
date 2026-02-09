@@ -113,6 +113,9 @@ func (f *FROST) SignRound2(
 	if len(commitments) < f.threshold {
 		return nil, errors.New("not enough commitments to meet threshold")
 	}
+	if err := f.validateSignerCount(len(commitments)); err != nil {
+		return nil, err
+	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -201,6 +204,9 @@ func (f *FROST) ComputeGroupCommitment(message []byte, commitments []*SigningCom
 	if len(commitments) == 0 {
 		return nil, ErrInvalidCommitment
 	}
+	if err := f.validateSignerCount(len(commitments)); err != nil {
+		return nil, err
+	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -245,6 +251,9 @@ func (f *FROST) AggregateWithVerification(
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
 	}
+	if err := f.validateSignerCount(len(commitments)); err != nil {
+		return nil, err
+	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -286,13 +295,20 @@ func (f *FROST) Aggregate(
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
 	}
+	if err := f.validateSignerCount(len(commitments)); err != nil {
+		return nil, err
+	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
-	// Validate share IDs match commitment IDs and check for duplicates
+	// Validate commitment IDs are unique, then match share IDs against them
 	commitIDs := make(map[string]bool)
 	for _, c := range commitments {
-		commitIDs[string(c.ID.Bytes())] = true
+		key := string(c.ID.Bytes())
+		if commitIDs[key] {
+			return nil, errors.New("duplicate commitment ID in aggregation")
+		}
+		commitIDs[key] = true
 	}
 	shareIDs := make(map[string]bool)
 	for _, s := range shares {
@@ -339,6 +355,9 @@ func (f *FROST) VerifyShare(
 	commitments []*SigningCommitment,
 	groupKey group.Point,
 ) (bool, error) {
+	if err := f.validateSignerCount(len(commitments)); err != nil {
+		return false, err
+	}
 	if err := validateCommitments(commitments); err != nil {
 		return false, err
 	}

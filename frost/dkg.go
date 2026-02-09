@@ -153,6 +153,19 @@ func (f *FROST) Finalize(p *Participant, allBroadcasts []*Round1Data) (*KeyShare
 		groupKey = f.group.NewPoint().Add(groupKey, broadcast.Commitments[0])
 	}
 
+	// Zero out secret DKG material now that the key share has been derived.
+	// Coefficients encode the participant's secret polynomial and are the most
+	// sensitive intermediate values — they must not persist beyond DKG completion.
+	zero := f.group.NewScalar()
+	for i := range p.coefficients {
+		p.coefficients[i].Set(zero)
+	}
+	p.coefficients = nil
+	for _, share := range p.receivedShares {
+		share.Set(zero)
+	}
+	p.receivedShares = nil
+
 	return &KeyShare{
 		ID:        p.id,
 		SecretKey: secretKey,

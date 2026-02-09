@@ -104,10 +104,14 @@ func (s *CircomScalar) Negate(a group.Scalar) group.Scalar {
 
 func (s *CircomScalar) Invert(a group.Scalar) (group.Scalar, error) {
 	as := assertCircomScalar(a)
-	if as.inner.Sign() == 0 {
+	// Reduce into a temporary before zero-check and inversion.
+	// Without reduction, a value equal to circSubOrder would have Sign() > 0
+	// but ModInverse would return nil (gcd != 1), causing a nil dereference.
+	reduced := new(big.Int).Mod(as.inner, circSubOrder)
+	if reduced.Sign() == 0 {
 		return nil, errors.New("cannot invert zero scalar")
 	}
-	s.inner.ModInverse(as.inner, circSubOrder)
+	s.inner.ModInverse(reduced, circSubOrder)
 	return s, nil
 }
 
@@ -359,7 +363,13 @@ func (p *CircomPoint) isOnCurve() bool {
 
 func (p *CircomPoint) Equal(b group.Point) bool {
 	bp := assertCircomPoint(b)
-	return p.x.Cmp(bp.x) == 0 && p.y.Cmp(bp.y) == 0
+	// Reduce coordinates mod fieldP before comparison to ensure equivalent
+	// representations (e.g., x and x + fieldP) compare as equal.
+	px := new(big.Int).Mod(p.x, fieldP)
+	py := new(big.Int).Mod(p.y, fieldP)
+	bx := new(big.Int).Mod(bp.x, fieldP)
+	by := new(big.Int).Mod(bp.y, fieldP)
+	return px.Cmp(bx) == 0 && py.Cmp(by) == 0
 }
 
 func (p *CircomPoint) IsIdentity() bool {

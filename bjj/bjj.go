@@ -102,10 +102,13 @@ func (s *Scalar) Negate(a group.Scalar) group.Scalar {
 // Returns an error if a is zero, as zero has no multiplicative inverse.
 func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
 	aScalar := assertScalar(a)
-	if aScalar.IsZero() {
+	// Reduce into a temporary before zero-check and inversion to avoid
+	// mutating the argument (IsZero calls reduce which modifies in-place).
+	reduced := new(big.Int).Mod(aScalar.inner, curveOrder)
+	if reduced.Sign() == 0 {
 		return nil, errors.New("cannot invert zero scalar")
 	}
-	s.inner.ModInverse(aScalar.inner, curveOrder)
+	s.inner.ModInverse(reduced, curveOrder)
 	return s, nil
 }
 
