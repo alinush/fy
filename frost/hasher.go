@@ -358,6 +358,7 @@ func poseidonHashChecked(elements []*big.Int) (*big.Int, error) {
 //   - encCommitList starts with a 4-byte count prefix (always a small integer)
 //   - signerID is always exactly 32 bytes (one field element)
 //   - Domain separator provides session-level separation
+//
 // bytesToFieldElements uses fixed 31-byte chunks, so element count is
 // deterministic from byte length.
 func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
@@ -399,6 +400,7 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 //   - seed is always exactly 32 bytes (one field element)
 //   - rho is always exactly 32 bytes (one field element)
 //   - Domain separator provides session-level separation
+//
 // bytesToFieldElements uses fixed 31-byte chunks, so element count is
 // deterministic from byte length.
 func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {

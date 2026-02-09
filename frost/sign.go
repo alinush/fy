@@ -435,7 +435,9 @@ func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) boo
 
 // encodeCommitments serializes the commitment list for hashing.
 // The encoding is: 4-byte commitment count || for each commitment:
-//   4-byte len || ID || 4-byte len || HidingPoint || 4-byte len || BindingPoint
+//
+//	4-byte len || ID || 4-byte len || HidingPoint || 4-byte len || BindingPoint
+//
 // Length-prefixing prevents ambiguous concatenation boundaries (per FROST RFC).
 func (f *FROST) encodeCommitments(commitments []*SigningCommitment) []byte {
 	var commBytes []byte
