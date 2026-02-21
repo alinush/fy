@@ -51,7 +51,7 @@ type Participant struct {
 func (f *FROST) NewParticipant(r io.Reader, id int) (*Participant, error) {
 	// Generate random polynomial of degree t-1
 	coeffs := make([]group.Scalar, f.threshold)
-	for i := 0; i < f.threshold; i++ {
+	for i := range f.threshold {
 		c, err := f.group.RandomScalar(r)
 		if err != nil {
 			return nil, err

@@ -22,7 +22,7 @@ func TestDKGAndSign(t *testing.T) {
 	t.Run("DKG", func(t *testing.T) {
 		// Create participants
 		participants := make([]*Participant, total)
-		for i := 0; i < total; i++ {
+		for i := range total {
 			p, err := f.NewParticipant(rand.Reader, i+1)
 			if err != nil {
 				t.Fatalf("failed to create participant %d: %v", i+1, err)
@@ -128,7 +128,7 @@ func TestSigningWithDifferentSignerSubsets(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		p, err := f.NewParticipant(rand.Reader, i+1)
 		if err != nil {
 			t.Fatal(err)
@@ -243,7 +243,7 @@ func TestSigningWithDifferentThresholds(t *testing.T) {
 
 			// Run DKG
 			participants := make([]*Participant, cfg.total)
-			for i := 0; i < cfg.total; i++ {
+			for i := range cfg.total {
 				p, err := f.NewParticipant(rand.Reader, i+1)
 				if err != nil {
 					t.Fatal(err)
@@ -319,7 +319,7 @@ func TestSignatureVerificationFailures(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p, _ := f.NewParticipant(rand.Reader, i+1)
 		participants[i] = p
 	}
@@ -464,7 +464,7 @@ func TestBlake2bHasher(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		p, err := f.NewParticipant(rand.Reader, i+1)
 		if err != nil {
 			t.Fatal(err)
@@ -557,7 +557,7 @@ func TestPoseidonHasher(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		p, err := f.NewParticipant(rand.Reader, i+1)
 		if err != nil {
 			t.Fatal(err)
@@ -715,7 +715,7 @@ func TestComputeGroupCommitment(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		p, err := f.NewParticipant(rand.Reader, i+1)
 		if err != nil {
 			t.Fatal(err)
@@ -873,7 +873,7 @@ func TestComputeGroupCommitment(t *testing.T) {
 
 		// Run DKG with Poseidon
 		pParticipants := make([]*Participant, total)
-		for i := 0; i < total; i++ {
+		for i := range total {
 			p, err := fPoseidon.NewParticipant(rand.Reader, i+1)
 			if err != nil {
 				t.Fatal(err)
@@ -965,7 +965,7 @@ func TestSecp256k1Hasher(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, total)
-	for i := 0; i < total; i++ {
+	for i := range total {
 		p, err := f.NewParticipant(rand.Reader, i+1)
 		if err != nil {
 			t.Fatal(err)
@@ -1052,7 +1052,7 @@ func TestDuplicateSignerIDsRejected(t *testing.T) {
 
 	// Run DKG
 	participants := make([]*Participant, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		p, _ := f.NewParticipant(rand.Reader, i+1)
 		participants[i] = p
 	}
@@ -1129,6 +1129,185 @@ func TestDuplicateSignerIDsRejected(t *testing.T) {
 	})
 }
 
+func TestMaxParticipantsValidation(t *testing.T) {
+	g := &bjj.BJJ{}
+
+	t.Run("AtLimit", func(t *testing.T) {
+		_, err := New(g, 2, MaxParticipants)
+		if err != nil {
+			t.Errorf("expected success for total=%d, got: %v", MaxParticipants, err)
+		}
+	})
+
+	t.Run("ExceedsLimit", func(t *testing.T) {
+		_, err := New(g, 2, MaxParticipants+1)
+		if err == nil {
+			t.Errorf("expected error for total=%d exceeding MaxParticipants", MaxParticipants+1)
+		}
+	})
+
+	t.Run("ExceedsLimitWithHasher", func(t *testing.T) {
+		_, err := NewWithHasher(g, 2, MaxParticipants+1, NewPoseidonHasher())
+		if err == nil {
+			t.Errorf("expected error for total=%d exceeding MaxParticipants", MaxParticipants+1)
+		}
+	})
+}
+
+// runDKG performs a complete DKG round for the given FROST instance and returns
+// key shares for all participants. This is a test helper to reduce boilerplate.
+func runDKG(t *testing.T, f *FROST, total int) []*KeyShare {
+	t.Helper()
+
+	participants := make([]*Participant, total)
+	for i := range total {
+		p, err := f.NewParticipant(rand.Reader, i+1)
+		if err != nil {
+			t.Fatalf("failed to create participant %d: %v", i+1, err)
+		}
+		participants[i] = p
+	}
+
+	broadcasts := make([]*Round1Data, total)
+	for i, p := range participants {
+		broadcasts[i] = p.Round1Broadcast()
+	}
+
+	for i, sender := range participants {
+		for j := range total {
+			if i == j {
+				continue
+			}
+			privateData := f.Round1PrivateSend(sender, j+1)
+			if err := f.Round2ReceiveShare(participants[j], privateData, broadcasts[i].Commitments); err != nil {
+				t.Fatalf("participant %d failed to verify share from %d: %v", j+1, i+1, err)
+			}
+		}
+	}
+
+	keyShares := make([]*KeyShare, total)
+	for i, p := range participants {
+		ks, err := f.Finalize(p, broadcasts)
+		if err != nil {
+			t.Fatalf("participant %d failed to finalize: %v", i+1, err)
+		}
+		keyShares[i] = ks
+	}
+
+	// Verify all participants have the same group key.
+	for i := 1; i < total; i++ {
+		if !keyShares[i].GroupKey.Equal(keyShares[0].GroupKey) {
+			t.Fatal("participants have different group keys")
+		}
+	}
+
+	return keyShares
+}
+
+// signAndVerify performs a complete signing round with the given signers and
+// verifies the resulting signature. Returns the signature on success.
+func signAndVerify(t *testing.T, f *FROST, signers []*KeyShare, message []byte) *Signature {
+	t.Helper()
+
+	nonces := make([]*SigningNonce, len(signers))
+	commitments := make([]*SigningCommitment, len(signers))
+	for i, ks := range signers {
+		n, c, err := f.SignRound1(rand.Reader, ks)
+		if err != nil {
+			t.Fatalf("signer %d failed round 1: %v", i+1, err)
+		}
+		nonces[i] = n
+		commitments[i] = c
+	}
+
+	sigShares := make([]*SignatureShare, len(signers))
+	for i, ks := range signers {
+		ss, err := f.SignRound2(ks, nonces[i], message, commitments)
+		if err != nil {
+			t.Fatalf("signer %d failed round 2: %v", i+1, err)
+		}
+		sigShares[i] = ss
+	}
+
+	sig, err := f.Aggregate(message, commitments, sigShares)
+	if err != nil {
+		t.Fatalf("failed to aggregate signature: %v", err)
+	}
+
+	if !f.Verify(message, sig, signers[0].GroupKey) {
+		t.Fatal("signature verification failed")
+	}
+
+	// Verify wrong message fails.
+	if f.Verify([]byte("wrong message"), sig, signers[0].GroupKey) {
+		t.Fatal("signature should not verify with wrong message")
+	}
+
+	return sig
+}
+
+func TestSigningWithPoseidon_5of7(t *testing.T) {
+	g := bjj.NewCircomBJJ()
+	threshold := 5
+	total := 7
+
+	f, err := NewWithHasher(g, threshold, total, NewPoseidonHasher())
+	if err != nil {
+		t.Fatalf("NewWithHasher failed: %v", err)
+	}
+
+	keyShares := runDKG(t, f, total)
+
+	message := []byte("test message for 5-of-7 signing with poseidon")
+
+	t.Run("ExactThreshold", func(t *testing.T) {
+		signAndVerify(t, f, keyShares[:threshold], message)
+	})
+
+	t.Run("AllSigners", func(t *testing.T) {
+		signAndVerify(t, f, keyShares, []byte("all signers message"))
+	})
+
+	t.Run("DifferentSubset", func(t *testing.T) {
+		// Use signers 3,4,5,6,7 (indices 2-6)
+		signAndVerify(t, f, keyShares[2:], []byte("different subset message"))
+	})
+}
+
+func TestSigningWithRailgun_5of7(t *testing.T) {
+	g := bjj.NewCircomBJJ()
+	threshold := 5
+	total := 7
+
+	f, err := NewWithHasher(g, threshold, total, NewRailgunHasher())
+	if err != nil {
+		t.Fatalf("NewWithHasher failed: %v", err)
+	}
+
+	keyShares := runDKG(t, f, total)
+
+	message := []byte("test message for 5-of-7 signing with railgun")
+
+	t.Run("ExactThreshold", func(t *testing.T) {
+		signAndVerify(t, f, keyShares[:threshold], message)
+	})
+
+	t.Run("AllSigners", func(t *testing.T) {
+		signAndVerify(t, f, keyShares, []byte("all signers message"))
+	})
+
+	t.Run("CrossHasherIncompatibility", func(t *testing.T) {
+		// Sign with RailgunHasher
+		sig := signAndVerify(t, f, keyShares[:threshold], []byte("cross-hasher test"))
+
+		// Should not verify with PoseidonHasher
+		fPoseidon, _ := NewWithHasher(g, threshold, total, NewPoseidonHasher())
+		if fPoseidon.Verify([]byte("cross-hasher test"), sig, keyShares[0].GroupKey) {
+			t.Error("railgun signature should not verify with poseidon hasher")
+		}
+	})
+}
+
 func TestSecp256k1WithDifferentThresholds(t *testing.T) {
 	g := secp256k1.New()
 
@@ -1149,7 +1328,7 @@ func TestSecp256k1WithDifferentThresholds(t *testing.T) {
 
 			// Run DKG
 			participants := make([]*Participant, cfg.total)
-			for i := 0; i < cfg.total; i++ {
+			for i := range cfg.total {
 				p, err := f.NewParticipant(rand.Reader, i+1)
 				if err != nil {
 					t.Fatal(err)

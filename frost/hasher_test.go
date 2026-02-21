@@ -80,3 +80,119 @@ func TestRailgunHasherH2FieldReduction(t *testing.T) {
 
 	_ = h.H2(g, pointBytes, pointBytes, msg)
 }
+
+func TestPoseidonSponge(t *testing.T) {
+	t.Run("17 elements", func(t *testing.T) {
+		elements := make([]*big.Int, 17)
+		for i := range elements {
+			elements[i] = big.NewInt(int64(i + 1))
+		}
+		hash, err := poseidonHash(elements)
+		if err != nil {
+			t.Fatalf("poseidonHash failed: %v", err)
+		}
+		if hash == nil || hash.Sign() == 0 {
+			t.Error("expected non-zero hash")
+		}
+	})
+
+	t.Run("32 elements", func(t *testing.T) {
+		elements := make([]*big.Int, 32)
+		for i := range elements {
+			elements[i] = big.NewInt(int64(i * 7))
+		}
+		hash, err := poseidonHash(elements)
+		if err != nil {
+			t.Fatalf("poseidonHash failed: %v", err)
+		}
+		if hash == nil || hash.Sign() == 0 {
+			t.Error("expected non-zero hash")
+		}
+	})
+
+	t.Run("backward compatible with 16 or fewer", func(t *testing.T) {
+		// Verify that <=16 elements produce the same result as direct poseidon.Hash
+		elements := make([]*big.Int, 5)
+		for i := range elements {
+			elements[i] = big.NewInt(int64(i + 100))
+		}
+		directHash, err := poseidon.Hash(elements)
+		if err != nil {
+			t.Fatalf("poseidon.Hash failed: %v", err)
+		}
+		spongeHash, err := poseidonHash(elements)
+		if err != nil {
+			t.Fatalf("poseidonHash failed: %v", err)
+		}
+		if directHash.Cmp(spongeHash) != 0 {
+			t.Errorf("sponge result differs from direct hash for <=16 elements")
+		}
+	})
+
+	t.Run("exactly 16 elements", func(t *testing.T) {
+		elements := make([]*big.Int, 16)
+		for i := range elements {
+			elements[i] = big.NewInt(int64(i + 1))
+		}
+		directHash, err := poseidon.Hash(elements)
+		if err != nil {
+			t.Fatalf("poseidon.Hash failed: %v", err)
+		}
+		spongeHash, err := poseidonHash(elements)
+		if err != nil {
+			t.Fatalf("poseidonHash failed: %v", err)
+		}
+		if directHash.Cmp(spongeHash) != 0 {
+			t.Errorf("sponge result differs from direct hash at boundary (16 elements)")
+		}
+	})
+
+	t.Run("empty returns error", func(t *testing.T) {
+		_, err := poseidonHash(nil)
+		if err == nil {
+			t.Error("expected error for empty input")
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		elements := make([]*big.Int, 20)
+		for i := range elements {
+			elements[i] = big.NewInt(int64(i + 42))
+		}
+		h1, _ := poseidonHash(elements)
+		h2, _ := poseidonHash(elements)
+		if h1.Cmp(h2) != 0 {
+			t.Error("same input produced different outputs")
+		}
+	})
+}
+
+func TestPoseidonHasher_5Signers(t *testing.T) {
+	// Verify that PoseidonHasher works with 5 signers (was previously limited to 3)
+	g := bjj.NewCircomBJJ()
+	h := NewPoseidonHasher()
+
+	// Simulate 5 signers: encCommitList for 5 signers = 4 + 5*108 = 544 bytes
+	encCommitList := make([]byte, 544)
+	for i := range encCommitList {
+		encCommitList[i] = byte(i % 256)
+	}
+	msg := make([]byte, 32)
+	for i := range msg {
+		msg[i] = byte(i)
+	}
+	signerID := make([]byte, 32)
+	signerID[31] = 1
+
+	// H1 should not panic
+	result := h.H1(g, msg, encCommitList, signerID)
+	if result == nil || result.IsZero() {
+		t.Error("H1 returned nil or zero for 5 signers")
+	}
+
+	// H5 should not panic
+	h5Result := h.H5(g, encCommitList)
+	if len(h5Result) != 32 {
+		t.Errorf("H5 returned %d bytes, expected 32", len(h5Result))
+	}
+}

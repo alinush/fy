@@ -113,9 +113,6 @@ func (f *FROST) SignRound2(
 	if len(commitments) < f.threshold {
 		return nil, errors.New("not enough commitments to meet threshold")
 	}
-	if err := f.validateSignerCount(len(commitments)); err != nil {
-		return nil, err
-	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -204,9 +201,6 @@ func (f *FROST) ComputeGroupCommitment(message []byte, commitments []*SigningCom
 	if len(commitments) == 0 {
 		return nil, ErrInvalidCommitment
 	}
-	if err := f.validateSignerCount(len(commitments)); err != nil {
-		return nil, err
-	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -251,9 +245,6 @@ func (f *FROST) AggregateWithVerification(
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
 	}
-	if err := f.validateSignerCount(len(commitments)); err != nil {
-		return nil, err
-	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
@@ -294,9 +285,6 @@ func (f *FROST) Aggregate(
 	}
 	if len(shares) != len(commitments) {
 		return nil, errors.New("shares and commitments count mismatch")
-	}
-	if err := f.validateSignerCount(len(commitments)); err != nil {
-		return nil, err
 	}
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
@@ -355,9 +343,6 @@ func (f *FROST) VerifyShare(
 	commitments []*SigningCommitment,
 	groupKey group.Point,
 ) (bool, error) {
-	if err := f.validateSignerCount(len(commitments)); err != nil {
-		return false, err
-	}
 	if err := validateCommitments(commitments); err != nil {
 		return false, err
 	}

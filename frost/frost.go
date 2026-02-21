@@ -8,6 +8,11 @@ import (
 	"github.com/f3rmion/fy/group"
 )
 
+// MaxParticipants is the maximum number of participants supported.
+// This limits resource usage (Poseidon sponge rounds, commitment encoding)
+// while supporting any practical threshold signing configuration.
+const MaxParticipants = 100
+
 // Errors returned by the FROST protocol.
 var (
 	ErrInvalidCommitment = errors.New("invalid or empty commitment list")
@@ -68,6 +73,8 @@ func New(g group.Group, threshold, total int) (*FROST, error) {
 // Use this constructor for Ledger/iden3 compatibility with [Blake2bHasher]
 // or other custom hash implementations.
 //
+// The total parameter must not exceed [MaxParticipants] (100).
+//
 // Example for Ledger compatibility:
 //
 //	f, err := frost.NewWithHasher(g, 2, 3, frost.NewBlake2bHasher())
@@ -78,15 +85,8 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 	if total < threshold {
 		return nil, errors.New("total must be >= threshold")
 	}
-
-	// Check hasher capacity if it declares limits.
-	// Validate against threshold (the typical signing group size), not total
-	// (the number of key holders). Signing with more than MaxSigners participants
-	// at once will be caught by poseidonHashChecked at runtime.
-	if limiter, ok := hasher.(HasherLimiter); ok {
-		if max := limiter.MaxSigners(); max > 0 && threshold > max {
-			return nil, fmt.Errorf("hasher supports at most %d signers per signing session, got threshold %d", max, threshold)
-		}
+	if total > MaxParticipants {
+		return nil, fmt.Errorf("total participants %d exceeds maximum %d", total, MaxParticipants)
 	}
 
 	return &FROST{
@@ -95,18 +95,6 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 		threshold: threshold,
 		total:     total,
 	}, nil
-}
-
-// validateSignerCount checks if the number of signers exceeds the hasher's capacity.
-// This prevents Poseidon-based hashers from panicking at runtime when the encoded
-// commitment list exceeds the 16-element input limit.
-func (f *FROST) validateSignerCount(n int) error {
-	if limiter, ok := f.hasher.(HasherLimiter); ok {
-		if max := limiter.MaxSigners(); max > 0 && n > max {
-			return fmt.Errorf("too many signers (%d), hasher supports at most %d", n, max)
-		}
-	}
-	return nil
 }
 
 // scalarFromInt creates a scalar from a non-negative integer value.

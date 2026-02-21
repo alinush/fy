@@ -48,15 +48,6 @@ type Hasher interface {
 	H5(g group.Group, encCommitList []byte) []byte
 }
 
-// HasherLimiter is an optional interface that hashers can implement to declare
-// their maximum supported signer count. Hashers with bounded input capacity
-// (e.g., Poseidon with its 16-element limit) should implement this interface.
-// NewWithHasher validates the total parameter against this limit at construction time.
-type HasherLimiter interface {
-	// MaxSigners returns the maximum number of signers this hasher supports.
-	// Returns 0 if there is no limit.
-	MaxSigners() int
-}
 
 // SHA256Hasher implements Hasher using SHA-256.
 // This is the default hasher for general use.
@@ -165,7 +156,7 @@ func (h *Blake2bHasher) hashToScalar(g group.Group, tag string, data ...[]byte) 
 
 	// Reverse bytes for little-endian interpretation
 	reversed := make([]byte, len(hash))
-	for i := 0; i < len(hash); i++ {
+	for i := range hash {
 		reversed[i] = hash[len(hash)-1-i]
 	}
 
@@ -218,6 +209,11 @@ func (h *Blake2bHasher) H5(g group.Group, encCommitList []byte) []byte {
 // used by Baby Jubjub. Inputs are encoded as field elements for optimal
 // zkSNARK constraint count.
 //
+// For inputs exceeding Poseidon's native 16-element limit, a sponge construction
+// is used: the first 16 elements are hashed, then subsequent batches of up to 15
+// elements are hashed with the previous output chained as the first input element.
+// This removes any signer count limitation.
+//
 // Domain separation is achieved using unique initial field element values
 // for each hash function (H1-H5).
 type PoseidonHasher struct {
@@ -237,14 +233,6 @@ func NewPoseidonHasher() *PoseidonHasher {
 		domainH4: hashTagToDomain("FROST-POSEIDON-H4"),
 		domainH5: hashTagToDomain("FROST-POSEIDON-H5"),
 	}
-}
-
-// MaxSigners returns the maximum supported signer count for PoseidonHasher.
-// Poseidon is limited to 16 field element inputs. With 3 signers and zero-length
-// messages, H1 uses ~13 elements. With 4+ signers, the encoded commitment list
-// exceeds 16 elements. Messages up to 93 bytes are supported with 3 signers.
-func (h *PoseidonHasher) MaxSigners() int {
-	return 3
 }
 
 // bn254ScalarFieldOrder is the BN254 scalar field order (Fr).
@@ -277,7 +265,7 @@ func bytesToFieldElements(data []byte) []*big.Int {
 	numChunks := (len(data) + chunkSize - 1) / chunkSize
 	elements := make([]*big.Int, numChunks)
 
-	for i := 0; i < numChunks; i++ {
+	for i := range numChunks {
 		start := i * chunkSize
 		end := start + chunkSize
 		if end > len(data) {
@@ -335,39 +323,73 @@ func poseidonToScalar(g group.Group, hash *big.Int) group.Scalar {
 	return s
 }
 
-// poseidonHashChecked validates input count before calling poseidon.Hash.
-// Poseidon supports at most 16 field element inputs. If this limit is exceeded,
-// it indicates a bug in element construction (e.g., input too large for the
-// fixed 31-byte chunking scheme). The element count is deterministic from byte
-// lengths, so callers can document their maximum supported sizes.
-func poseidonHashChecked(elements []*big.Int) (*big.Int, error) {
-	if len(elements) > 16 {
-		return nil, fmt.Errorf("poseidon input has %d elements, maximum is 16", len(elements))
-	}
+// poseidonHash computes a Poseidon hash over arbitrary-length field element inputs.
+// For 16 or fewer elements, calls poseidon.Hash directly (backward compatible).
+// For more than 16 elements, uses a sponge construction with a length commitment:
+// the element count is prepended as the first element of the first batch,
+// followed by the first 15 input elements. Subsequent batches of up to 15
+// elements are hashed with the previous output chained as the first input element.
+// The length commitment prevents collision attacks where different-length inputs
+// share a prefix.
+func poseidonHash(elements []*big.Int) (*big.Int, error) {
 	if len(elements) == 0 {
 		return nil, fmt.Errorf("poseidon input is empty")
 	}
-	return poseidon.Hash(elements)
+	if len(elements) <= 16 {
+		return poseidon.Hash(elements)
+	}
+
+	// Sponge construction for >16 elements.
+	// Prepend element count to the first batch for length commitment,
+	// ensuring different-length inputs cannot produce collisions even if
+	// they share a prefix. The count element is only added in the sponge
+	// path, preserving backward compatibility for <=16 elements.
+	firstBatch := make([]*big.Int, 16)
+	firstBatch[0] = big.NewInt(int64(len(elements)))
+	copy(firstBatch[1:], elements[:15])
+
+	state, err := poseidon.Hash(firstBatch)
+	if err != nil {
+		return nil, err
+	}
+
+	remaining := elements[15:]
+	for len(remaining) > 0 {
+		batchSize := 15
+		if len(remaining) < batchSize {
+			batchSize = len(remaining)
+		}
+		batch := make([]*big.Int, 1+batchSize)
+		batch[0] = state
+		copy(batch[1:], remaining[:batchSize])
+		state, err = poseidon.Hash(batch)
+		if err != nil {
+			return nil, err
+		}
+		remaining = remaining[batchSize:]
+	}
+
+	return state, nil
 }
 
 // H1 implements Hasher.H1 (binding factor computation).
 // Hashes: domain_H1 || msg || encCommitList || signerID as field elements.
 //
-// Length prefixes are omitted to conserve Poseidon's 16-element budget.
-// Boundary ambiguity between msg and encCommitList is mitigated by:
+// Length prefixes are omitted since bytesToFieldElements uses fixed 31-byte chunks,
+// making element count deterministic from byte length. Boundary ambiguity between
+// msg and encCommitList is mitigated by:
 //   - encCommitList starts with a 4-byte count prefix (always a small integer)
 //   - signerID is always exactly 32 bytes (one field element)
 //   - Domain separator provides session-level separation
 //
-// bytesToFieldElements uses fixed 31-byte chunks, so element count is
-// deterministic from byte length.
+// For large signer counts the sponge construction handles arbitrary input lengths.
 func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
 	elements := []*big.Int{h.domainH1}
 	elements = append(elements, bytesToFieldElements(msg)...)
 	elements = append(elements, bytesToFieldElements(encCommitList)...)
 	elements = append(elements, new(big.Int).SetBytes(signerID))
 
-	hash, err := poseidonHashChecked(elements)
+	hash, err := poseidonHash(elements)
 	if err != nil {
 		// This should never happen with valid inputs
 		panic("poseidon hash failed: " + err.Error())
@@ -384,7 +406,7 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	elements = append(elements, pointBytesToFieldElements(Y)...)
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidonHashChecked(elements)
+	hash, err := poseidonHash(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -395,21 +417,19 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 // H3 implements Hasher.H3 (nonce generation).
 // Hashes: domain_H3 || seed || rho || msg as field elements.
 //
-// Length prefixes are omitted to conserve Poseidon's 16-element budget.
-// Boundary ambiguity between seed, rho, and msg is mitigated by:
+// Length prefixes are omitted since bytesToFieldElements uses fixed 31-byte chunks,
+// making element count deterministic from byte length. Boundary ambiguity is
+// mitigated by:
 //   - seed is always exactly 32 bytes (one field element)
 //   - rho is always exactly 32 bytes (one field element)
 //   - Domain separator provides session-level separation
-//
-// bytesToFieldElements uses fixed 31-byte chunks, so element count is
-// deterministic from byte length.
 func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {
 	elements := []*big.Int{h.domainH3}
 	elements = append(elements, bytesToFieldElements(seed)...)
 	elements = append(elements, bytesToFieldElements(rho)...)
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidonHashChecked(elements)
+	hash, err := poseidonHash(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -423,7 +443,7 @@ func (h *PoseidonHasher) H4(g group.Group, msg []byte) []byte {
 	elements := []*big.Int{h.domainH4}
 	elements = append(elements, bytesToFieldElements(msg)...)
 
-	hash, err := poseidonHashChecked(elements)
+	hash, err := poseidonHash(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -444,7 +464,7 @@ func (h *PoseidonHasher) H5(g group.Group, encCommitList []byte) []byte {
 	elements := []*big.Int{h.domainH5}
 	elements = append(elements, bytesToFieldElements(encCommitList)...)
 
-	hash, err := poseidonHashChecked(elements)
+	hash, err := poseidonHash(elements)
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
@@ -484,12 +504,6 @@ func NewRailgunHasher() *RailgunHasher {
 	}
 }
 
-// MaxSigners returns the maximum supported signer count for RailgunHasher.
-// Delegates to PoseidonHasher limits since H1/H3/H4/H5 use Poseidon.
-func (h *RailgunHasher) MaxSigners() int {
-	return h.inner.MaxSigners()
-}
-
 // H1 implements Hasher.H1 (binding factor computation).
 // Delegates to PoseidonHasher since this is internal to FROST.
 func (h *RailgunHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
@@ -527,7 +541,7 @@ func (h *RailgunHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	ay.Mod(ay, bn254ScalarFieldOrder)
 
 	// Compute challenge exactly as circomlibjs: poseidon([R.x, R.y, A.x, A.y, msg])
-	hash, err := poseidonHashChecked([]*big.Int{rx, ry, ax, ay, msgInt})
+	hash, err := poseidonHash([]*big.Int{rx, ry, ax, ay, msgInt})
 	if err != nil {
 		panic("poseidon hash failed: " + err.Error())
 	}
