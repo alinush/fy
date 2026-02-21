@@ -48,7 +48,6 @@ type Hasher interface {
 	H5(g group.Group, encCommitList []byte) []byte
 }
 
-
 // SHA256Hasher implements Hasher using SHA-256.
 // This is the default hasher for general use.
 type SHA256Hasher struct{}
