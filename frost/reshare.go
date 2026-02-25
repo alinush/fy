@@ -207,8 +207,7 @@ func (f *FROST) ReshareFinalize(rnm *ReshareNewMember, allBroadcasts []*ReshareR
 		return nil, fmt.Errorf("expected %d shares from old members, got %d", len(allBroadcasts), len(rnm.receivedShares))
 	}
 	for _, b := range allBroadcasts {
-		key := string(b.ID.Bytes())
-		if _, ok := rnm.receivedShares[key]; !ok {
+		if _, ok := rnm.receivedShares[string(b.ID.Bytes())]; !ok {
 			return nil, errors.New("missing share from old member who broadcast commitments")
 		}
 	}
