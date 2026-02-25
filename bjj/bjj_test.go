@@ -374,3 +374,25 @@ func TestPoint(t *testing.T) {
 		}
 	})
 }
+
+func TestCircomScalarZero(t *testing.T) {
+	g := NewCircomBJJ()
+
+	a, _ := g.RandomScalar(rand.Reader)
+	if a.IsZero() {
+		t.Fatal("random scalar should not be zero")
+	}
+
+	a.Zero()
+	if !a.IsZero() {
+		t.Error("scalar should be zero after Zero()")
+	}
+
+	// Verify the underlying big.Int words are zeroed
+	s := a.(*CircomScalar)
+	for i, w := range s.inner.Bits() {
+		if w != 0 {
+			t.Errorf("big.Int word[%d] = %d, want 0", i, w)
+		}
+	}
+}

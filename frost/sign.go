@@ -122,10 +122,10 @@ func (f *FROST) SignRound2(
 		return nil, errors.New("nonce already consumed or invalid")
 	}
 
-	// Zero out nonce values on exit
+	// Securely erase nonce scalars on exit to prevent memory residue.
 	defer func() {
-		nonce.D = f.group.NewScalar() // zero
-		nonce.E = f.group.NewScalar() // zero
+		nonce.D.Zero()
+		nonce.E.Zero()
 	}()
 
 	// Check for duplicate signer IDs and verify own commitment is present
