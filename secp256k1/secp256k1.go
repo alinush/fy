@@ -145,6 +145,13 @@ func (s *Scalar) IsZero() bool {
 	return s.inner.IsZero()
 }
 
+// Zero sets the scalar to zero and securely erases the previous value from
+// the underlying ModNScalar memory. ModNScalar.Zero() zeroes all 8 internal
+// uint32 words in-place.
+func (s *Scalar) Zero() {
+	s.inner.Zero()
+}
+
 // Point represents a point on the secp256k1 curve.
 // It implements [group.Point] using dcrd's JacobianPoint for efficient
 // point arithmetic.

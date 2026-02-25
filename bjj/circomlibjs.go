@@ -155,6 +155,16 @@ func (s *CircomScalar) IsZero() bool {
 	return s.inner.Sign() == 0
 }
 
+// Zero sets the scalar to zero and securely erases the previous value from
+// the underlying big.Int memory. See [Scalar.Zero] for details.
+func (s *CircomScalar) Zero() {
+	words := s.inner.Bits()
+	for i := range words {
+		words[i] = 0
+	}
+	s.inner.SetInt64(0)
+}
+
 // CircomPoint represents a point on the circomlibjs Baby JubJub curve.
 type CircomPoint struct {
 	x, y *big.Int

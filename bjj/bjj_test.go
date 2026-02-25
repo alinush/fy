@@ -83,6 +83,39 @@ func TestScalar(t *testing.T) {
 		}
 	})
 
+	t.Run("Zero", func(t *testing.T) {
+		a, _ := g.RandomScalar(rand.Reader)
+		if a.IsZero() {
+			t.Fatal("random scalar should not be zero")
+		}
+
+		// Grab the internal bytes before zeroing
+		preBytes := a.Bytes()
+		allZero := true
+		for _, b := range preBytes {
+			if b != 0 {
+				allZero = false
+				break
+			}
+		}
+		if allZero {
+			t.Fatal("random scalar bytes should not be all zero")
+		}
+
+		a.Zero()
+		if !a.IsZero() {
+			t.Error("scalar should be zero after Zero()")
+		}
+
+		// Verify the underlying big.Int words are zeroed
+		s := a.(*Scalar)
+		for i, w := range s.inner.Bits() {
+			if w != 0 {
+				t.Errorf("big.Int word[%d] = %d, want 0", i, w)
+			}
+		}
+	})
+
 	t.Run("Equal", func(t *testing.T) {
 		var a group.Scalar
 		for {

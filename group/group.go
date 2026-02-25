@@ -37,6 +37,10 @@ type Scalar interface {
 	Equal(b Scalar) bool
 	// IsZero reports whether the receiver is zero.
 	IsZero() bool
+	// Zero sets the receiver to zero and securely erases the previous value
+	// from the underlying memory. Use this instead of Set(NewScalar()) when
+	// zeroing secret scalars (nonces, key shares) to prevent memory residue.
+	Zero()
 }
 
 // Point represents an element of a cryptographic group, typically a point

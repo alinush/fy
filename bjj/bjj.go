@@ -160,6 +160,17 @@ func (s *Scalar) IsZero() bool {
 	return s.inner.Sign() == 0
 }
 
+// Zero sets the scalar to zero and securely erases the previous value from
+// the underlying big.Int memory. This uses big.Int.Bits() to access the
+// internal Word array and zero each element in-place before resetting to zero.
+func (s *Scalar) Zero() {
+	words := s.inner.Bits()
+	for i := range words {
+		words[i] = 0
+	}
+	s.inner.SetInt64(0)
+}
+
 // Point represents a point on the Baby Jubjub curve.
 // It implements [group.Point] by wrapping gnark-crypto's PointAffine.
 //

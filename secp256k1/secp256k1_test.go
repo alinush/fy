@@ -83,6 +83,27 @@ func TestScalar(t *testing.T) {
 		}
 	})
 
+	t.Run("Zero", func(t *testing.T) {
+		a, _ := g.RandomScalar(rand.Reader)
+		if a.IsZero() {
+			t.Fatal("random scalar should not be zero")
+		}
+
+		a.Zero()
+		if !a.IsZero() {
+			t.Error("scalar should be zero after Zero()")
+		}
+
+		// Verify the underlying ModNScalar words are zeroed
+		s := a.(*Scalar)
+		b := s.Bytes()
+		for i, v := range b {
+			if v != 0 {
+				t.Errorf("byte[%d] = %d, want 0", i, v)
+			}
+		}
+	})
+
 	t.Run("Equal", func(t *testing.T) {
 		var a group.Scalar
 		for {
