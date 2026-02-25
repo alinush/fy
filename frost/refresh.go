@@ -16,7 +16,7 @@ import (
 // Create instances using [FROST.NewRefreshParticipant].
 type RefreshParticipant struct {
 	id             group.Scalar
-	coefficients   []group.Scalar          // coefficients[0] == 0 (invariant)
+	coefficients   []group.Scalar // coefficients[0] == 0 (invariant)
 	commitments    []group.Point
 	receivedDeltas map[string]group.Scalar // deltas from other participants
 }
