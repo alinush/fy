@@ -114,6 +114,31 @@ func (f *FROST) scalarFromInt(n int) group.Scalar {
 	return s
 }
 
+// lagrangeCoefficientFromIDs computes the Lagrange basis polynomial
+// evaluated at zero for participant myID within the set allIDs.
+// Returns lambda_i = product(x_j) / product(x_j - x_i) for j != i.
+func (f *FROST) lagrangeCoefficientFromIDs(myID group.Scalar, allIDs []group.Scalar) (group.Scalar, error) {
+	num := f.scalarFromInt(1)
+	den := f.scalarFromInt(1)
+
+	for _, id := range allIDs {
+		if id.Equal(myID) {
+			continue
+		}
+		// num *= id
+		num = f.group.NewScalar().Mul(num, id)
+		// den *= (id - myID)
+		diff := f.group.NewScalar().Sub(id, myID)
+		den = f.group.NewScalar().Mul(den, diff)
+	}
+
+	denInv, err := f.group.NewScalar().Invert(den)
+	if err != nil {
+		return nil, errors.New("lagrange coefficient: zero denominator (duplicate IDs?)")
+	}
+	return f.group.NewScalar().Mul(num, denInv), nil
+}
+
 // evalPolynomial evaluates a polynomial at point x using Horner's method.
 // The polynomial is represented by its coefficients [a0, a1, ..., an]
 // where p(x) = a0 + a1*x + a2*x^2 + ... + an*x^n.

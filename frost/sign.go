@@ -469,23 +469,9 @@ func (f *FROST) computeBindingFactors(message, encCommitList []byte, commitments
 // This is used to combine signature shares into a valid threshold signature.
 // Returns an error if the denominator is zero (e.g., duplicate signer IDs).
 func (f *FROST) lagrangeCoefficient(id group.Scalar, commitments []*SigningCommitment) (group.Scalar, error) {
-	num := f.scalarFromInt(1)
-	den := f.scalarFromInt(1)
-
-	for _, c := range commitments {
-		if c.ID.Equal(id) {
-			continue
-		}
-		// num *= c.ID
-		num = f.group.NewScalar().Mul(num, c.ID)
-		// den *= (c.ID - id)
-		diff := f.group.NewScalar().Sub(c.ID, id)
-		den = f.group.NewScalar().Mul(den, diff)
+	allIDs := make([]group.Scalar, len(commitments))
+	for i, c := range commitments {
+		allIDs[i] = c.ID
 	}
-
-	denInv, err := f.group.NewScalar().Invert(den)
-	if err != nil {
-		return nil, errors.New("lagrange coefficient: zero denominator (duplicate signer IDs?)")
-	}
-	return f.group.NewScalar().Mul(num, denInv), nil
+	return f.lagrangeCoefficientFromIDs(id, allIDs)
 }

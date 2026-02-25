@@ -4,6 +4,7 @@ package dkg
 
 import (
 	"errors"
+	"fmt"
 
 	"github.com/f3rmion/fy/dkls23"
 	"github.com/f3rmion/fy/dkls23/ot"
@@ -17,6 +18,11 @@ type Parameters struct {
 	ShareCount uint8
 }
 
+// MaxShareCount is the maximum number of participants supported.
+// This prevents uint8 overflow in loop constructs (e.g., for j := uint8(1); j <= ShareCount; j++
+// would infinite-loop at 255) and limits resource usage.
+const MaxShareCount = 100
+
 // Validate checks that the DKG parameters are valid.
 func (p *Parameters) Validate() error {
 	if p.Threshold < 2 {
@@ -24,6 +30,9 @@ func (p *Parameters) Validate() error {
 	}
 	if p.ShareCount < p.Threshold {
 		return errors.New("share count must be >= threshold")
+	}
+	if p.ShareCount > MaxShareCount {
+		return fmt.Errorf("share count %d exceeds maximum %d", p.ShareCount, MaxShareCount)
 	}
 	return nil
 }
