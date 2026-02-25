@@ -246,3 +246,12 @@ func (rom *ReshareOldMember) Zero() {
 	}
 	rom.coefficients = nil
 }
+
+// Zero securely erases all secret material held by the reshare new member.
+// Call this after [FROST.ReshareFinalize] to clean up accumulated shares.
+func (rnm *ReshareNewMember) Zero() {
+	for key := range rnm.receivedShares {
+		rnm.receivedShares[key].Zero()
+	}
+	rnm.receivedShares = nil
+}

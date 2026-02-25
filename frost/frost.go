@@ -46,6 +46,20 @@ type KeyShare struct {
 	GroupKey group.Point
 }
 
+// Zero securely erases secret material in the KeyShare.
+// It zeroes both the secret key and the participant ID, since the ID
+// is a Shamir evaluation point that could aid share reconstruction.
+// Public fields (PublicKey, GroupKey) are left intact so callers can
+// still reference the group key after cleanup.
+func (ks *KeyShare) Zero() {
+	if ks.SecretKey != nil {
+		ks.SecretKey.Zero()
+	}
+	if ks.ID != nil {
+		ks.ID.Zero()
+	}
+}
+
 // Signature represents a Schnorr signature produced by the FROST protocol.
 // It can be verified against the group public key using [FROST.Verify].
 type Signature struct {
