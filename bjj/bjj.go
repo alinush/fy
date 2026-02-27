@@ -180,6 +180,16 @@ type Point struct {
 	inner twistededwards.PointAffine
 }
 
+// NewPointFromAffine creates a new [Point] from a gnark-crypto [twistededwards.PointAffine].
+// This is useful for constructing BJJ points from raw affine coordinates,
+// such as in hash-to-curve implementations.
+//
+// No validation is performed. The caller must ensure the point is on the
+// curve and, if required, in the prime-order subgroup.
+func NewPointFromAffine(p twistededwards.PointAffine) *Point {
+	return &Point{inner: p}
+}
+
 // Add sets p to a + b and returns p.
 func (p *Point) Add(a, b group.Point) group.Point {
 	aPoint := assertPoint(a)
@@ -365,6 +375,12 @@ func (g *BJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	s.inner.SetBytes(expanded)
 	s.reduce()
 	return s, nil
+}
+
+// XBytes returns the x-coordinate of the point as a 32-byte big-endian slice.
+func (p *Point) XBytes() []byte {
+	xBytes := p.inner.X.Bytes()
+	return xBytes[:]
 }
 
 // Order returns the order of the Baby Jubjub curve's prime-order subgroup
