@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"fmt"
 	"math/big"
+	"os"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
+	"github.com/consensys/gnark-crypto/kzg"
 	"github.com/consensys/gnark/backend/plonk"
 	"github.com/consensys/gnark/constraint"
 	"github.com/consensys/gnark/frontend"
@@ -31,11 +33,10 @@ var (
 )
 
 // initEVRFKeys compiles the eVRF circuit and generates PLONK keys.
-// Called once via sync.Once. Uses unsafekzg SRS for the POC.
+// Called once via sync.Once.
 //
-// WARNING: The unsafekzg SRS has known toxic waste. This breaks proof soundness
-// in an adversarial setting. For production, replace with a trusted setup ceremony
-// or universal SRS. See https://docs.gnark.consensys.io/HowTo/setup for guidance.
+// By default, loads the Aztec Ignition ceremony SRS (downloaded and cached
+// on first use). Set FY_GOLDEN_UNSAFE_SRS=1 to use unsafekzg for testing.
 func initEVRFKeys() {
 	evrfSetupOnce.Do(func() {
 		// Compile the circuit.
@@ -49,11 +50,25 @@ func initEVRFKeys() {
 			return
 		}
 
-		// Generate SRS (unsafe, for testing/POC only -- toxic waste is known).
-		canonical, lagrange, err := unsafekzg.NewSRS(evrfCCS)
-		if err != nil {
-			evrfSetupErr = fmt.Errorf("golden: generating KZG SRS: %w", err)
-			return
+		var canonical, lagrange kzg.SRS
+		var err error
+
+		if os.Getenv("FY_GOLDEN_UNSAFE_SRS") == "1" {
+			// Test/POC path: unsafe SRS with known toxic waste.
+			fmt.Fprintln(os.Stderr, "golden: WARNING: FY_GOLDEN_UNSAFE_SRS=1 is set. "+
+				"Using INSECURE test SRS with known toxic waste. DO NOT USE IN PRODUCTION.")
+			canonical, lagrange, err = unsafekzg.NewSRS(evrfCCS)
+			if err != nil {
+				evrfSetupErr = fmt.Errorf("golden: generating unsafe SRS: %w", err)
+				return
+			}
+		} else {
+			// Production path: Aztec Ignition ceremony SRS.
+			canonical, lagrange, err = LoadCeremonySRS(evrfCCS)
+			if err != nil {
+				evrfSetupErr = fmt.Errorf("golden: loading ceremony SRS: %w", err)
+				return
+			}
 		}
 
 		// PLONK setup.
