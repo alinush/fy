@@ -767,12 +767,26 @@ polynomial commitments over BN254.
 
 \begin{remark}[SRS Security]
   \label{rem:srs}
-  The current implementation uses \texttt{unsafekzg.NewSRS}, which generates a
-  KZG SRS with \emph{known toxic waste}. This breaks proof soundness in an
-  adversarial setting: a party with access to the toxic waste can forge proofs.
-  For production deployment, this must be replaced with an SRS from a proper
-  trusted setup ceremony or a universal SRS (e.g., the Ethereum KZG ceremony
-  for BN254).
+  The production implementation uses the \textbf{Aztec Ignition ceremony SRS},
+  a BN254 powers-of-tau structured reference string produced by a multi-party
+  computation with 176 participants. The ceremony transcript
+  (\texttt{transcript00.dat}, ${\sim}307$~MB, containing ${\sim}5 \times 10^6$
+  G1 points) is downloaded on first use and cached locally under
+  \texttt{\$HOME/.cache/fy/srs/}. After parsing, a batch Schwartz--Zippel
+  pairing verification~\cite{schwartz1980} checks consistency of all $\tau^i
+  \cdot G_1$ powers against $\tau \cdot G_2$:
+  \begin{equation}
+    e\!\Bigl(\sum_i r^i \cdot [\tau^{i+1}]G_1,\; G_2\Bigr)
+    = e\!\Bigl(\sum_i r^i \cdot [\tau^i]G_1,\; [\tau]G_2\Bigr)
+    \label{eq:srs-verify}
+  \end{equation}
+  for a random challenge $r \getsr \Fr$. This catches download corruption,
+  malformed transcripts, and inconsistent $G_1$/$G_2$ data in a single
+  multi-pairing.
+
+  For testing, set \texttt{FY\_GOLDEN\_UNSAFE\_SRS=1} to use
+  \texttt{unsafekzg.NewSRS} (known toxic waste---\textbf{do not use in
+  production}).
 \end{remark}
 
 \subsubsection{Secret Key Zeroing}
@@ -1489,10 +1503,10 @@ The implementation provides the following guarantees:
   \item Systematic secure erasure of all intermediate secret material.
 \end{itemize}
 
-For production deployment, the unsafe KZG SRS (Remark~\ref{rem:srs}) must be
-replaced with a proper trusted setup ceremony, and the hash-to-curve
-construction should be evaluated for the target threat model's timing
-requirements.
+The production KZG SRS is sourced from the Aztec Ignition ceremony (176
+participants); see Remark~\ref{rem:srs} for the integrity verification
+procedure. The hash-to-curve construction should be evaluated for the target
+threat model's timing requirements.
 
 % ══════════════════════════════════════════════════════════════════════════════
 \begin{thebibliography}{9}
@@ -1532,6 +1546,16 @@ requirements.
   B.~Whitehat, M.~Bellés, and J.~Baylina.
   Baby Jubjub Elliptic Curve.
   EIP-2494, Ethereum Improvement Proposals, 2020.
+
+\bibitem{schwartz1980}
+  J.~T.~Schwartz.
+  Fast probabilistic algorithms for verification of polynomial identities.
+  \emph{Journal of the ACM}, 27(4):701--717, 1980.
+
+\bibitem{aztec-ignition}
+  Aztec Protocol.
+  Aztec Ignition: A Multi-Party Computation Ceremony for BN254.
+  \url{https://github.com/AztecProtocol/ignition-verification}, 2019.
 
 \end{thebibliography}
 
