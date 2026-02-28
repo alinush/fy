@@ -297,6 +297,14 @@ func (p *Point) IsIdentity() bool {
 	return p.inner.Z.IsZero()
 }
 
+// Zero sets the point to the identity (point at infinity) and securely erases
+// the previous coordinate values from the underlying secp256k1.FieldVal memory.
+func (p *Point) Zero() {
+	p.inner.X.Zero()
+	p.inner.Y.Zero()
+	p.inner.Z.Zero()
+}
+
 // Secp256k1 implements [group.Group] for the secp256k1 curve.
 //
 // Secp256k1 is a zero-sized type that provides access to secp256k1 curve

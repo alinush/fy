@@ -67,35 +67,40 @@ func initEVRFKeys() {
 
 // bjjPointCoords extracts the (X, Y) coordinates from a BJJ group.Point
 // as big.Int values. BJJ coordinates are in BN254 Fr (native field).
-func bjjPointCoords(p group.Point) (x, y *big.Int) {
+func bjjPointCoords(p group.Point) (x, y *big.Int, err error) {
 	// BJJ Point has UncompressedBytes() returning 64 bytes: X || Y
 	type uncompressor interface {
 		UncompressedBytes() []byte
 	}
 	uc, ok := p.(uncompressor)
 	if !ok {
-		panic("golden: bjjPointCoords: point does not implement UncompressedBytes")
+		return nil, nil, fmt.Errorf("golden: bjjPointCoords: point %T does not implement UncompressedBytes", p)
 	}
 	data := uc.UncompressedBytes()
 	x = new(big.Int).SetBytes(data[0:32])
 	y = new(big.Int).SetBytes(data[32:64])
-	return
+	return x, y, nil
 }
 
 // g1PointCoords extracts the (X, Y) coordinates from a BN254 G1 group.Point
 // as big.Int values. G1 coordinates are in BN254 Fp (base field).
-func g1PointCoords(p group.Point) (x, y *big.Int) {
+func g1PointCoords(p group.Point) (x, y *big.Int, err error) {
 	// BN254 G1 Point.Bytes() returns Marshal() = 64 bytes: X || Y (uncompressed).
 	data := p.Bytes()
+	if len(data) < 64 {
+		return nil, nil, fmt.Errorf("golden: g1PointCoords: expected 64 bytes, got %d", len(data))
+	}
 	x = new(big.Int).SetBytes(data[0:32])
 	y = new(big.Int).SetBytes(data[32:64])
-	return
+	return x, y, nil
 }
 
 // generateEVRFProofPLONK generates a PLONK proof for the eVRF circuit.
+//
+// This function is BN254/BJJ-specific: it uses hashToCurveTryAndIncrement directly
+// (rather than suite.H1/H2) because the PLONK circuit is compiled for the BN254/BJJ
+// curve pair. Alternative curve pairs require their own proof implementation.
 func generateEVRFProofPLONK(
-	bjjGroup group.Group,
-	_ group.Group,
 	dealerSK group.Scalar,
 	dealerPK group.Point,
 	recipientPK group.Point,
@@ -110,29 +115,45 @@ func generateEVRFProofPLONK(
 	}
 
 	// Extract BJJ point coordinates.
-	dealerPKX, dealerPKY := bjjPointCoords(dealerPK)
-	recipientPKX, recipientPKY := bjjPointCoords(recipientPK)
+	dealerPKX, dealerPKY, err := bjjPointCoords(dealerPK)
+	if err != nil {
+		return nil, fmt.Errorf("golden: dealer PK coords: %w", err)
+	}
+	recipientPKX, recipientPKY, err := bjjPointCoords(recipientPK)
+	if err != nil {
+		return nil, fmt.Errorf("golden: recipient PK coords: %w", err)
+	}
 
 	// Compute H1, H2 from session data.
-	h1, err := H1(bjjGroup, sessionData...)
+	h1, err := hashToCurveTryAndIncrement(h1Domain, sessionData...)
 	if err != nil {
 		return nil, fmt.Errorf("golden: H1 for proof: %w", err)
 	}
-	h2, err := H2(bjjGroup, sessionData...)
+	h2, err := hashToCurveTryAndIncrement(h2Domain, sessionData...)
 	if err != nil {
 		return nil, fmt.Errorf("golden: H2 for proof: %w", err)
 	}
-	h1X, h1Y := bjjPointCoords(h1)
-	h2X, h2Y := bjjPointCoords(h2)
+	h1X, h1Y, err := bjjPointCoords(h1)
+	if err != nil {
+		return nil, fmt.Errorf("golden: H1 coords: %w", err)
+	}
+	h2X, h2Y, err := bjjPointCoords(h2)
+	if err != nil {
+		return nil, fmt.Errorf("golden: H2 coords: %w", err)
+	}
 
 	// Alpha as big.Int.
 	alphaBigInt := new(big.Int).SetBytes(alpha.Bytes())
 
 	// R commitment coordinates (BN254 G1 Fp coordinates).
-	rX, rY := g1PointCoords(padResult.RCommitment)
+	rX, rY, err := g1PointCoords(padResult.RCommitment)
+	if err != nil {
+		return nil, fmt.Errorf("golden: R commitment coords: %w", err)
+	}
 
-	// Dealer SK as big.Int. Zero after witness creation.
-	skBigInt := new(big.Int).SetBytes(dealerSK.Bytes())
+	// Dealer SK as big.Int. Zero both the byte slice and big.Int after witness creation.
+	skBytes := dealerSK.Bytes()
+	skBigInt := new(big.Int).SetBytes(skBytes)
 
 	// Construct the full witness assignment.
 	assignment := &EVRFCircuit{
@@ -155,7 +176,7 @@ func generateEVRFProofPLONK(
 	// Create the witness.
 	witness, err := frontend.NewWitness(assignment, ecc.BN254.ScalarField())
 
-	// Zero the secret key big.Int immediately after witness creation.
+	// Zero all secret key material immediately after witness creation.
 	// Overwrite the backing array words before resetting, since SetInt64(0) only
 	// sets the length to zero without clearing the underlying memory.
 	skWords := skBigInt.Bits()
@@ -163,6 +184,9 @@ func generateEVRFProofPLONK(
 		skWords[i] = 0
 	}
 	skBigInt.SetInt64(0)
+	for i := range skBytes {
+		skBytes[i] = 0
+	}
 
 	if err != nil {
 		return nil, fmt.Errorf("golden: creating witness: %w", err)
@@ -184,9 +208,9 @@ func generateEVRFProofPLONK(
 }
 
 // verifyEVRFProofPLONK verifies a PLONK proof for the eVRF circuit.
+//
+// This function is BN254/BJJ-specific (see generateEVRFProofPLONK).
 func verifyEVRFProofPLONK(
-	bjjGroup group.Group,
-	_ group.Group,
 	dealerPK group.Point,
 	recipientPK group.Point,
 	sessionData [][]byte,
@@ -206,26 +230,41 @@ func verifyEVRFProofPLONK(
 	}
 
 	// Extract BJJ point coordinates for public inputs.
-	dealerPKX, dealerPKY := bjjPointCoords(dealerPK)
-	recipientPKX, recipientPKY := bjjPointCoords(recipientPK)
+	dealerPKX, dealerPKY, err := bjjPointCoords(dealerPK)
+	if err != nil {
+		return fmt.Errorf("golden: dealer PK coords: %w", err)
+	}
+	recipientPKX, recipientPKY, err := bjjPointCoords(recipientPK)
+	if err != nil {
+		return fmt.Errorf("golden: recipient PK coords: %w", err)
+	}
 
 	// Compute H1, H2 from session data.
-	h1, err := H1(bjjGroup, sessionData...)
+	h1, err := hashToCurveTryAndIncrement(h1Domain, sessionData...)
 	if err != nil {
 		return fmt.Errorf("golden: H1 for verify: %w", err)
 	}
-	h2, err := H2(bjjGroup, sessionData...)
+	h2, err := hashToCurveTryAndIncrement(h2Domain, sessionData...)
 	if err != nil {
 		return fmt.Errorf("golden: H2 for verify: %w", err)
 	}
-	h1X, h1Y := bjjPointCoords(h1)
-	h2X, h2Y := bjjPointCoords(h2)
+	h1X, h1Y, err := bjjPointCoords(h1)
+	if err != nil {
+		return fmt.Errorf("golden: H1 coords: %w", err)
+	}
+	h2X, h2Y, err := bjjPointCoords(h2)
+	if err != nil {
+		return fmt.Errorf("golden: H2 coords: %w", err)
+	}
 
 	// Alpha as big.Int.
 	alphaBigInt := new(big.Int).SetBytes(alpha.Bytes())
 
 	// R commitment coordinates.
-	rX, rY := g1PointCoords(rCommitment)
+	rX, rY, err := g1PointCoords(rCommitment)
+	if err != nil {
+		return fmt.Errorf("golden: R commitment coords: %w", err)
+	}
 
 	// Construct the witness assignment with all fields populated.
 	// gnark requires all fields (including private) to be non-nil when creating

@@ -9,10 +9,10 @@ import (
 )
 
 func TestH1OnCurveAndSubgroup(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 	data := []byte("test-input-h1")
 
-	p, err := H1(g, data)
+	p, err := suite.H1(data)
 	if err != nil {
 		t.Fatalf("H1 failed: %v", err)
 	}
@@ -25,7 +25,7 @@ func TestH1OnCurveAndSubgroup(t *testing.T) {
 
 	// Verify subgroup membership via serialization round-trip.
 	encoded := p.Bytes()
-	restored := g.NewPoint()
+	restored := suite.InnerGroup().NewPoint()
 	if _, err := restored.SetBytes(encoded); err != nil {
 		t.Errorf("H1 result failed subgroup/on-curve check via SetBytes: %v", err)
 	}
@@ -38,10 +38,10 @@ func TestH1OnCurveAndSubgroup(t *testing.T) {
 }
 
 func TestH2OnCurveAndSubgroup(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 	data := []byte("test-input-h2")
 
-	p, err := H2(g, data)
+	p, err := suite.H2(data)
 	if err != nil {
 		t.Fatalf("H2 failed: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestH2OnCurveAndSubgroup(t *testing.T) {
 	}
 
 	encoded := p.Bytes()
-	restored := g.NewPoint()
+	restored := suite.InnerGroup().NewPoint()
 	if _, err := restored.SetBytes(encoded); err != nil {
 		t.Errorf("H2 result failed subgroup/on-curve check via SetBytes: %v", err)
 	}
@@ -65,15 +65,15 @@ func TestH2OnCurveAndSubgroup(t *testing.T) {
 }
 
 func TestH1Deterministic(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 	data := []byte("deterministic-test-input")
 
-	p1, err := H1(g, data)
+	p1, err := suite.H1(data)
 	if err != nil {
 		t.Fatalf("H1 first call failed: %v", err)
 	}
 
-	p2, err := H1(g, data)
+	p2, err := suite.H1(data)
 	if err != nil {
 		t.Fatalf("H1 second call failed: %v", err)
 	}
@@ -84,15 +84,15 @@ func TestH1Deterministic(t *testing.T) {
 }
 
 func TestH1H2DomainSeparation(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 	data := []byte("domain-separation-test")
 
-	p1, err := H1(g, data)
+	p1, err := suite.H1(data)
 	if err != nil {
 		t.Fatalf("H1 failed: %v", err)
 	}
 
-	p2, err := H2(g, data)
+	p2, err := suite.H2(data)
 	if err != nil {
 		t.Fatalf("H2 failed: %v", err)
 	}
@@ -103,14 +103,14 @@ func TestH1H2DomainSeparation(t *testing.T) {
 }
 
 func TestH1DifferentInputs(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 
-	p1, err := H1(g, []byte("input-alpha"))
+	p1, err := suite.H1([]byte("input-alpha"))
 	if err != nil {
 		t.Fatalf("H1(input-alpha) failed: %v", err)
 	}
 
-	p2, err := H1(g, []byte("input-beta"))
+	p2, err := suite.H1([]byte("input-beta"))
 	if err != nil {
 		t.Fatalf("H1(input-beta) failed: %v", err)
 	}
@@ -121,14 +121,14 @@ func TestH1DifferentInputs(t *testing.T) {
 }
 
 func TestH1MultipleDataArgs(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
 
-	p1, err := H1(g, []byte("part1"), []byte("part2"))
+	p1, err := suite.H1([]byte("part1"), []byte("part2"))
 	if err != nil {
 		t.Fatalf("H1(part1, part2) failed: %v", err)
 	}
 
-	p2, err := H1(g, []byte("part1part2"))
+	p2, err := suite.H1([]byte("part1part2"))
 	if err != nil {
 		t.Fatalf("H1(part1part2) failed: %v", err)
 	}
@@ -149,10 +149,11 @@ func TestH1MultipleDataArgs(t *testing.T) {
 }
 
 func TestH1CofactorClearing(t *testing.T) {
-	g := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
+	g := suite.InnerGroup()
 	data := []byte("cofactor-test")
 
-	p, err := H1(g, data)
+	p, err := suite.H1(data)
 	if err != nil {
 		t.Fatalf("H1 failed: %v", err)
 	}
@@ -162,7 +163,7 @@ func TestH1CofactorClearing(t *testing.T) {
 	order := new(big.Int).Set(&curve.Order)
 
 	check := g.NewPoint().ScalarMult(
-		mustScalarFromBigInt(g, order),
+		mustScalarFromBigInt(g.(*bjj.BJJ), order),
 		p,
 	)
 	if !check.IsIdentity() {

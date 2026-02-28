@@ -1,7 +1,6 @@
 package golden
 
 import (
-	"crypto/rand"
 	"fmt"
 	"io"
 
@@ -10,20 +9,25 @@ import (
 
 // CreateDealing generates a DKG dealing message for the non-interactive GOLDEN DKG.
 //
-// The dealer creates a random polynomial over Fr (BN254 scalar field), computes
-// VSS commitments on BN254 G1, generates Shamir shares in Fr, encrypts shares
-// for each peer using eVRF pads, and produces a Schnorr proof of BJJ PK ownership.
+// The dealer creates a random polynomial over the outer-group scalar field, computes
+// Feldman VSS commitments on the outer group, generates Shamir shares, encrypts shares
+// for each peer using eVRF pads, and produces a Schnorr proof of inner-curve PK ownership.
 //
-// The polynomial and shares are in Fr (not Z_l) to ensure consistency between
-// the Shamir evaluation and the Feldman VSS commitment verification.
+// The polynomial and shares are in the outer-group scalar field to ensure consistency
+// between the Shamir evaluation and the Feldman VSS commitment verification.
 func CreateDealing(
-	bjjGroup group.Group,
-	bn254Group group.Group,
+	suite CurveSuite,
 	config *DkgConfig,
 	self *Participant,
 	peers []*Participant,
 	rng io.Reader,
 ) (*DkgDealing, error) {
+	if suite == nil {
+		return nil, ErrNilSuite
+	}
+	innerGroup := suite.InnerGroup()
+	outerGroup := suite.OuterGroup()
+
 	// Validate inputs.
 	if self.ID < 1 || self.ID > MaxNodeID {
 		return nil, ErrInvalidNodeID
@@ -56,24 +60,24 @@ func CreateDealing(
 	}
 
 	// Step 1: Sample omega in Fr, create polynomial of degree t-1 over Fr.
-	omega, err := bn254Group.RandomScalar(rng)
+	omega, err := outerGroup.RandomScalar(rng)
 	if err != nil {
 		return nil, fmt.Errorf("golden: sampling omega: %w", err)
 	}
 
-	poly, err := NewRandomPolynomial(bn254Group, omega, config.T-1, rng)
+	poly, err := NewRandomPolynomial(outerGroup, omega, config.T-1, rng)
 	if err != nil {
 		return nil, fmt.Errorf("golden: creating polynomial: %w", err)
 	}
 
-	// Step 2: Compute VSS commitments on BN254 G1.
-	vssCommitments, err := VSSCommit(bn254Group, poly)
+	// Step 2: Compute VSS commitments on the outer group.
+	vssCommitments, err := VSSCommit(outerGroup, poly)
 	if err != nil {
 		return nil, fmt.Errorf("golden: VSS commit: %w", err)
 	}
 
 	// Step 3: Generate shares for all participants in Fr.
-	shares := GenerateShares(bn254Group, poly, config.N)
+	shares := GenerateShares(outerGroup, poly, config.N)
 	ownShare := shares[self.ID]
 
 	// Step 4: Random 32-byte nonce for the session.
@@ -82,15 +86,15 @@ func CreateDealing(
 		return nil, fmt.Errorf("golden: random nonce: %w", err)
 	}
 
-	// Step 5: Schnorr proof of BJJ identity (proves DH key ownership), bound to session.
-	identityProof, err := ProveIdentity(bjjGroup, self.SK, self.PK, config.SessionID, rng)
+	// Step 5: Schnorr proof of inner-curve identity (proves DH key ownership), bound to session.
+	identityProof, err := ProveIdentity(innerGroup, self.SK, self.PK, config.SessionID, rng)
 	if err != nil {
 		return nil, fmt.Errorf("golden: identity proof: %w", err)
 	}
 
 	// Step 6: Derive alpha for LHL combination.
-	alpha, err := bn254Group.HashToScalar(
-		[]byte("golden-lhl-alpha"),
+	alpha, err := outerGroup.HashToScalar(
+		[]byte(lhlAlphaDomain),
 		config.SessionID[:],
 	)
 	if err != nil {
@@ -104,14 +108,14 @@ func CreateDealing(
 
 	for _, peer := range peers {
 		// Derive pad via eVRF.
-		padResult, err := DerivePad(bjjGroup, bn254Group, self.SK, peer.PK, sessionData, alpha)
+		padResult, err := DerivePad(suite, self.SK, peer.PK, sessionData, alpha)
 		if err != nil {
 			return nil, fmt.Errorf("golden: derive pad for peer %d: %w", peer.ID, err)
 		}
 
 		// Encrypt: z = pad + share (both in Fr).
 		peerShare := shares[peer.ID]
-		z := bn254Group.NewScalar().Add(padResult.Pad, peerShare)
+		z := outerGroup.NewScalar().Add(padResult.Pad, peerShare)
 
 		ciphertexts[peer.ID] = &Ciphertext{
 			RCommitment:    padResult.RCommitment,
@@ -119,8 +123,7 @@ func CreateDealing(
 		}
 
 		// Generate eVRF ZK proof.
-		proof, err := GenerateEVRFProof(
-			bjjGroup, bn254Group,
+		proof, err := suite.GenerateEVRFProof(
 			self.SK, self.PK, peer.PK,
 			sessionData, alpha, padResult,
 		)
@@ -160,14 +163,19 @@ func CreateDealing(
 
 // VerifyDealing verifies a DKG dealing message from another participant.
 func VerifyDealing(
-	bjjGroup group.Group,
-	bn254Group group.Group,
+	suite CurveSuite,
 	config *DkgConfig,
 	msg *Round0Msg,
 	self *Participant,
 	dealerPK group.Point,
-	recipientPKs map[int]group.Point, // NodeID -> BJJ PK for all recipients (excluding dealer)
+	recipientPKs map[int]group.Point, // NodeID -> inner-curve PK for all recipients (excluding dealer)
 ) error {
+	if suite == nil {
+		return ErrNilSuite
+	}
+	innerGroup := suite.InnerGroup()
+	outerGroup := suite.OuterGroup()
+
 	// Check session ID.
 	if msg.SessionID != config.SessionID {
 		return ErrSessionIDMismatch
@@ -204,17 +212,17 @@ func VerifyDealing(
 		}
 	}
 
-	// Verify identity proof (proves BJJ DH key ownership), bound to session.
+	// Verify identity proof (proves inner-curve DH key ownership), bound to session.
 	if msg.IdentityProof == nil {
 		return ErrNilIdentityProof
 	}
-	if err := VerifyIdentity(bjjGroup, dealerPK, config.SessionID, msg.IdentityProof); err != nil {
+	if err := VerifyIdentity(innerGroup, dealerPK, config.SessionID, msg.IdentityProof); err != nil {
 		return fmt.Errorf("golden: identity proof: %w", err)
 	}
 
 	// Derive alpha.
-	alpha, err := bn254Group.HashToScalar(
-		[]byte("golden-lhl-alpha"),
+	alpha, err := outerGroup.HashToScalar(
+		[]byte(lhlAlphaDomain),
 		config.SessionID[:],
 	)
 	if err != nil {
@@ -229,10 +237,10 @@ func VerifyDealing(
 		}
 
 		// z * G_bn254 should equal R + ExpectedShareCommitment(VSS, recipientID).
-		zG := bn254Group.NewPoint().ScalarMult(ct.EncryptedShare, bn254Group.Generator())
+		zG := outerGroup.NewPoint().ScalarMult(ct.EncryptedShare, outerGroup.Generator())
 
-		expectedShareCommit := ExpectedShareCommitment(bn254Group, msg.VSSCommitments, recipientID)
-		rhs := bn254Group.NewPoint().Add(ct.RCommitment, expectedShareCommit)
+		expectedShareCommit := ExpectedShareCommitment(outerGroup, msg.VSSCommitments, recipientID)
+		rhs := outerGroup.NewPoint().Add(ct.RCommitment, expectedShareCommit)
 
 		if !zG.Equal(rhs) {
 			return fmt.Errorf("%w: recipient %d", ErrCiphertextVerification, recipientID)
@@ -252,8 +260,7 @@ func VerifyDealing(
 			return fmt.Errorf("golden: no PK for eVRF proof recipient %d", recipientID)
 		}
 
-		err := VerifyEVRFProof(
-			bjjGroup, bn254Group,
+		err := suite.VerifyEVRFProof(
 			dealerPK,
 			recipientPK,
 			sessionData, alpha,
@@ -271,21 +278,26 @@ func VerifyDealing(
 // Complete finalizes the DKG protocol for one participant, combining all dealings.
 //
 // The participant aggregates:
-//  1. Their own share from their own polynomial (in Fr)
-//  2. Decrypted shares from all peer dealings (in Fr)
+//  1. Their own share from their own polynomial (outer-group scalar field)
+//  2. Decrypted shares from all peer dealings (outer-group scalar field)
 //  3. The group public key from VSSCommitments[0] of all dealings
 //  4. Public key shares for all participants from VSS commitments
 //
-// All share arithmetic is in Fr to maintain consistency with VSS.
+// All share arithmetic is in the outer-group scalar field to maintain
+// consistency with VSS.
 func Complete(
-	bjjGroup group.Group,
-	bn254Group group.Group,
+	suite CurveSuite,
 	config *DkgConfig,
 	self *Participant,
 	ownDealing *DkgDealing,
 	peerDealings []*Round0Msg,
-	peerPKs map[int]group.Point, // NodeID -> BJJ PK
+	peerPKs map[int]group.Point, // NodeID -> inner-curve PK
 ) (*DkgOutput, error) {
+	if suite == nil {
+		return nil, ErrNilSuite
+	}
+	outerGroup := suite.OuterGroup()
+
 	if len(peerDealings) != config.N-1 {
 		return nil, ErrPeerCountMismatch
 	}
@@ -309,19 +321,27 @@ func Complete(
 	}
 
 	// Derive alpha.
-	alpha, err := bn254Group.HashToScalar(
-		[]byte("golden-lhl-alpha"),
+	alpha, err := outerGroup.HashToScalar(
+		[]byte(lhlAlphaDomain),
 		config.SessionID[:],
 	)
 	if err != nil {
 		return nil, fmt.Errorf("golden: deriving alpha: %w", err)
 	}
 
-	// Start with own share (in Fr).
-	secretShare := bn254Group.NewScalar().Set(ownDealing.PrivateShare)
+	// Start with own share (outer-group scalar field).
+	secretShare := outerGroup.NewScalar().Set(ownDealing.PrivateShare)
 
-	// Group key = sum of all VSSCommitments[0] (= omega_d * G_bn254 for each dealer).
-	groupKey := bn254Group.NewPoint().Set(ownDealing.Message.VSSCommitments[0])
+	// errZeroSecret zeros secretShare and returns the formatted error.
+	// Used on error paths in the loop below to prevent leaking the partial
+	// secret accumulation.
+	errZeroSecret := func(format string, args ...any) (*DkgOutput, error) {
+		secretShare.Zero()
+		return nil, fmt.Errorf(format, args...)
+	}
+
+	// Group key = sum of all VSSCommitments[0] (= omega_d * G_outer for each dealer).
+	groupKey := outerGroup.NewPoint().Set(ownDealing.Message.VSSCommitments[0])
 
 	// Collect all VSS commitments for computing PK shares.
 	allVSSCommitments := make([][]group.Point, 0, config.N)
@@ -329,7 +349,7 @@ func Complete(
 
 	for _, msg := range peerDealings {
 		// Add peer's PK contribution to group key.
-		groupKey = bn254Group.NewPoint().Add(groupKey, msg.VSSCommitments[0])
+		groupKey = outerGroup.NewPoint().Add(groupKey, msg.VSSCommitments[0])
 
 		// Collect VSS commitments for PK share computation.
 		allVSSCommitments = append(allVSSCommitments, msg.VSSCommitments)
@@ -337,27 +357,27 @@ func Complete(
 		// Find our ciphertext.
 		ct, ok := msg.Ciphertexts[self.ID]
 		if !ok {
-			return nil, fmt.Errorf("golden: no ciphertext for self (ID %d) in dealing from %d", self.ID, msg.From)
+			return errZeroSecret("golden: no ciphertext for self (ID %d) in dealing from %d", self.ID, msg.From)
 		}
 		if ct == nil {
-			return nil, fmt.Errorf("%w: from dealer %d", ErrNilCiphertext, msg.From)
+			return errZeroSecret("%s: from dealer %d", ErrNilCiphertext, msg.From)
 		}
 
 		// Re-derive pad.
 		sessionData := [][]byte{config.SessionID[:], msg.RandomMsg[:]}
-		padResult, err := DerivePad(bjjGroup, bn254Group, self.SK, peerPKs[msg.From], sessionData, alpha)
+		padResult, err := DerivePad(suite, self.SK, peerPKs[msg.From], sessionData, alpha)
 		if err != nil {
-			return nil, fmt.Errorf("golden: re-derive pad from %d: %w", msg.From, err)
+			return errZeroSecret("golden: re-derive pad from %d: %w", msg.From, err)
 		}
 
-		// Decrypt: share = z - pad (in Fr).
-		decryptedShare := bn254Group.NewScalar().Sub(ct.EncryptedShare, padResult.Pad)
+		// Decrypt: share = z - pad (outer-group scalar field).
+		decryptedShare := outerGroup.NewScalar().Sub(ct.EncryptedShare, padResult.Pad)
 
 		// Zero pad after use.
 		padResult.Pad.Zero()
 
-		// Accumulate in Fr (same field as polynomial evaluation).
-		secretShare = bn254Group.NewScalar().Add(secretShare, decryptedShare)
+		// Accumulate in the outer-group scalar field (same field as polynomial evaluation).
+		secretShare = outerGroup.NewScalar().Add(secretShare, decryptedShare)
 
 		// Zero decrypted share.
 		decryptedShare.Zero()
@@ -371,11 +391,11 @@ func Complete(
 	for i := 1; i <= config.N; i++ {
 		var pkShare group.Point
 		for _, vss := range allVSSCommitments {
-			shareCommit := ExpectedShareCommitment(bn254Group, vss, i)
+			shareCommit := ExpectedShareCommitment(outerGroup, vss, i)
 			if pkShare == nil {
 				pkShare = shareCommit
 			} else {
-				pkShare = bn254Group.NewPoint().Add(pkShare, shareCommit)
+				pkShare = outerGroup.NewPoint().Add(pkShare, shareCommit)
 			}
 		}
 		pkShares[i] = pkShare
@@ -386,50 +406,4 @@ func Complete(
 		PublicKeyShares: pkShares,
 		SecretShare:     secretShare,
 	}, nil
-}
-
-// GenerateEVRFProof generates a ZK proof for the eVRF pad derivation using gnark PLONK.
-// This proves that RCommitment was correctly derived from DH(sk, peerPK) without
-// revealing the secret key.
-func GenerateEVRFProof(
-	bjjGroup group.Group,
-	bn254Group group.Group,
-	dealerSK group.Scalar,
-	dealerPK group.Point,
-	recipientPK group.Point,
-	sessionData [][]byte,
-	alpha group.Scalar,
-	padResult *PadResult,
-) ([]byte, error) {
-	return generateEVRFProofPLONK(
-		bjjGroup, bn254Group,
-		dealerSK, dealerPK, recipientPK,
-		sessionData, alpha, padResult,
-	)
-}
-
-// VerifyEVRFProof verifies a ZK proof for the eVRF pad derivation.
-func VerifyEVRFProof(
-	bjjGroup group.Group,
-	bn254Group group.Group,
-	dealerPK group.Point,
-	recipientPK group.Point,
-	sessionData [][]byte,
-	alpha group.Scalar,
-	rCommitment group.Point,
-	proofBytes []byte,
-) error {
-	return verifyEVRFProofPLONK(
-		bjjGroup, bn254Group,
-		dealerPK, recipientPK,
-		sessionData, alpha,
-		rCommitment, proofBytes,
-	)
-}
-
-// init initializes the eVRF proof system keys lazily.
-func init() {
-	// PLONK keys are compiled and cached on first use.
-	// See evrf_proof.go for the circuit definition and key management.
-	_ = rand.Reader // ensure crypto/rand is imported
 }

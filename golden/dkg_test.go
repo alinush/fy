@@ -6,8 +6,6 @@ import (
 	"io"
 	"testing"
 
-	"github.com/f3rmion/fy/bjj"
-	"github.com/f3rmion/fy/bn254g1"
 	"github.com/f3rmion/fy/frost"
 	"github.com/f3rmion/fy/group"
 )
@@ -17,13 +15,13 @@ import (
 // --------------------------------------------------------------------------
 
 // testParticipant creates a participant with a BJJ key pair.
-func testParticipant(t *testing.T, bjjGroup group.Group, id int) *Participant {
+func testParticipant(t *testing.T, g group.Group, id int) *Participant {
 	t.Helper()
-	sk, err := bjjGroup.RandomScalar(rand.Reader)
+	sk, err := g.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatalf("participant %d: random scalar: %v", id, err)
 	}
-	pk := bjjGroup.NewPoint().ScalarMult(sk, bjjGroup.Generator())
+	pk := g.NewPoint().ScalarMult(sk, g.Generator())
 	return &Participant{ID: id, SK: sk, PK: pk}
 }
 
@@ -53,30 +51,33 @@ func scalarFromIntForTest(g group.Group, n int) group.Scalar {
 // This bypasses the PLONK circuit compilation while still exercising the
 // polynomial, VSS, share encryption, and identity proof logic.
 func createDealingNoProofs(
-	bjjGroup, bn254Group group.Group,
+	suite CurveSuite,
 	config *DkgConfig,
 	self *Participant,
 	peers []*Participant,
 	rng io.Reader,
 ) (*DkgDealing, error) {
+	innerGroup := suite.InnerGroup()
+	outerGroup := suite.OuterGroup()
+
 	// Sample omega and create polynomial of degree t-1 over Fr.
-	omega, err := bn254Group.RandomScalar(rng)
+	omega, err := outerGroup.RandomScalar(rng)
 	if err != nil {
 		return nil, err
 	}
-	poly, err := NewRandomPolynomial(bn254Group, omega, config.T-1, rng)
+	poly, err := NewRandomPolynomial(outerGroup, omega, config.T-1, rng)
 	if err != nil {
 		return nil, err
 	}
 
 	// VSS commitments on BN254 G1.
-	vssCommitments, err := VSSCommit(bn254Group, poly)
+	vssCommitments, err := VSSCommit(outerGroup, poly)
 	if err != nil {
 		return nil, err
 	}
 
 	// Generate shares for all participants in Fr.
-	shares := GenerateShares(bn254Group, poly, config.N)
+	shares := GenerateShares(outerGroup, poly, config.N)
 	ownShare := shares[self.ID]
 
 	// Random 32-byte nonce.
@@ -86,13 +87,13 @@ func createDealingNoProofs(
 	}
 
 	// Schnorr identity proof (cheap, no PLONK).
-	identityProof, err := ProveIdentity(bjjGroup, self.SK, self.PK, config.SessionID, rng)
+	identityProof, err := ProveIdentity(innerGroup, self.SK, self.PK, config.SessionID, rng)
 	if err != nil {
 		return nil, err
 	}
 
 	// Derive alpha for LHL combination.
-	alpha, err := bn254Group.HashToScalar([]byte("golden-lhl-alpha"), config.SessionID[:])
+	alpha, err := outerGroup.HashToScalar([]byte(lhlAlphaDomain), config.SessionID[:])
 	if err != nil {
 		return nil, err
 	}
@@ -102,19 +103,28 @@ func createDealingNoProofs(
 	ciphertexts := make(map[int]*Ciphertext, len(peers))
 
 	for _, peer := range peers {
-		padResult, err := DerivePad(bjjGroup, bn254Group, self.SK, peer.PK, sessionData, alpha)
+		padResult, err := DerivePad(suite, self.SK, peer.PK, sessionData, alpha)
 		if err != nil {
 			return nil, err
 		}
-		z := bn254Group.NewScalar().Add(padResult.Pad, shares[peer.ID])
+		z := outerGroup.NewScalar().Add(padResult.Pad, shares[peer.ID])
 		ciphertexts[peer.ID] = &Ciphertext{
 			RCommitment:    padResult.RCommitment,
 			EncryptedShare: z,
 		}
+		padResult.Pad.Zero()
 	}
 
-	// Zero polynomial coefficients after use.
+	// Zero polynomial coefficients and omega after use.
 	poly.Zero()
+	omega.Zero()
+
+	// Zero peer shares (own share is kept).
+	for id, share := range shares {
+		if id != self.ID {
+			share.Zero()
+		}
+	}
 
 	return &DkgDealing{
 		Message: &Round0Msg{
@@ -131,13 +141,7 @@ func createDealingNoProofs(
 }
 
 // goldenRunDKGNoProofs runs the DKG protocol without eVRF proof generation/verification.
-// This exercises the core DKG logic (polynomial, VSS, share encryption, aggregation)
-// without requiring the gnark PLONK circuit. All tests that verify DKG correctness
-// (share reconstruction, FROST signing, group key agreement) use this helper.
-//
-// The full integration tests using CreateDealing + VerifyDealing (with eVRF proofs)
-// are in goldenRunDKG and will pass once the eVRF circuit compilation is fixed.
-func goldenRunDKGNoProofs(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgConfig, participants []*Participant) map[int]*DkgOutput {
+func goldenRunDKGNoProofs(t *testing.T, suite CurveSuite, config *DkgConfig, participants []*Participant) map[int]*DkgOutput {
 	t.Helper()
 	n := len(participants)
 
@@ -156,7 +160,7 @@ func goldenRunDKGNoProofs(t *testing.T, bjjGroup, bn254Group group.Group, config
 				peers = append(peers, p)
 			}
 		}
-		dealing, err := createDealingNoProofs(bjjGroup, bn254Group, config, self, peers, rand.Reader)
+		dealing, err := createDealingNoProofs(suite, config, self, peers, rand.Reader)
 		if err != nil {
 			t.Fatalf("createDealingNoProofs(node %d): %v", self.ID, err)
 		}
@@ -164,8 +168,6 @@ func goldenRunDKGNoProofs(t *testing.T, bjjGroup, bn254Group group.Group, config
 	}
 
 	// Phase 2: Skip VerifyDealing (requires eVRF proofs).
-	// The ciphertext consistency is verified implicitly: if shares decrypt
-	// correctly, the encryption was consistent.
 
 	// Phase 3: Each participant completes the DKG.
 	outputs := make(map[int]*DkgOutput, n)
@@ -176,7 +178,7 @@ func goldenRunDKGNoProofs(t *testing.T, bjjGroup, bn254Group group.Group, config
 				peerMsgs = append(peerMsgs, dealing.Message)
 			}
 		}
-		output, err := Complete(bjjGroup, bn254Group, config, self, dealings[self.ID], peerMsgs, peerPKs)
+		output, err := Complete(suite, config, self, dealings[self.ID], peerMsgs, peerPKs)
 		if err != nil {
 			t.Fatalf("Complete(node %d): %v", self.ID, err)
 		}
@@ -188,9 +190,7 @@ func goldenRunDKGNoProofs(t *testing.T, bjjGroup, bn254Group group.Group, config
 
 // goldenRunDKG runs a complete DKG protocol including eVRF proof generation
 // and verification. This is the full integration test path.
-// NOTE: Requires a working eVRF PLONK circuit. Will fail if circuit compilation
-// has issues (pre-existing gnark compatibility issue).
-func goldenRunDKG(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgConfig, participants []*Participant) map[int]*DkgOutput {
+func goldenRunDKG(t *testing.T, suite CurveSuite, config *DkgConfig, participants []*Participant) map[int]*DkgOutput {
 	t.Helper()
 	n := len(participants)
 
@@ -207,7 +207,7 @@ func goldenRunDKG(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgCon
 				peers = append(peers, p)
 			}
 		}
-		dealing, err := CreateDealing(bjjGroup, bn254Group, config, self, peers, rand.Reader)
+		dealing, err := CreateDealing(suite, config, self, peers, rand.Reader)
 		if err != nil {
 			t.Fatalf("CreateDealing(node %d): %v", self.ID, err)
 		}
@@ -225,7 +225,7 @@ func goldenRunDKG(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgCon
 					recipientPKs[id] = pk
 				}
 			}
-			err := VerifyDealing(bjjGroup, bn254Group, config, dealing.Message, verifier, peerPKs[dealerID], recipientPKs)
+			err := VerifyDealing(suite, config, dealing.Message, verifier, peerPKs[dealerID], recipientPKs)
 			if err != nil {
 				t.Fatalf("VerifyDealing(verifier %d, dealer %d): %v", verifier.ID, dealerID, err)
 			}
@@ -240,7 +240,7 @@ func goldenRunDKG(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgCon
 				peerMsgs = append(peerMsgs, dealing.Message)
 			}
 		}
-		output, err := Complete(bjjGroup, bn254Group, config, self, dealings[self.ID], peerMsgs, peerPKs)
+		output, err := Complete(suite, config, self, dealings[self.ID], peerMsgs, peerPKs)
 		if err != nil {
 			t.Fatalf("Complete(node %d): %v", self.ID, err)
 		}
@@ -252,9 +252,6 @@ func goldenRunDKG(t *testing.T, bjjGroup, bn254Group group.Group, config *DkgCon
 
 // lagrangeCoeffFr computes the Lagrange coefficient for participant i
 // in the given subset, evaluated at x=0, using Fr arithmetic.
-//
-// lambda_i = product(0 - j) / product(i - j) for j in subset, j != i
-//          = product(-j) / product(i - j)
 func lagrangeCoeffFr(g group.Group, i int, subset []int) group.Scalar {
 	num := scalarFromIntForTest(g, 1)
 	den := scalarFromIntForTest(g, 1)
@@ -265,10 +262,8 @@ func lagrangeCoeffFr(g group.Group, i int, subset []int) group.Scalar {
 			continue
 		}
 		jScalar := scalarFromIntForTest(g, j)
-		// num *= (0 - j) = -j
 		negJ := g.NewScalar().Negate(jScalar)
 		num = g.NewScalar().Mul(num, negJ)
-		// den *= (i - j)
 		diff := g.NewScalar().Sub(iScalar, jScalar)
 		den = g.NewScalar().Mul(den, diff)
 	}
@@ -282,7 +277,7 @@ func lagrangeCoeffFr(g group.Group, i int, subset []int) group.Scalar {
 
 // frostSignAndVerify is a test helper that performs a full FROST signing round
 // with the given signer IDs and verifies the resulting signature.
-func frostSignAndVerify(t *testing.T, bn254G group.Group, f *frost.FROST, keyShares map[int]*frost.KeyShare, signerIDs []int, msg []byte) {
+func frostSignAndVerify(t *testing.T, g group.Group, f *frost.FROST, keyShares map[int]*frost.KeyShare, signerIDs []int, msg []byte) {
 	t.Helper()
 
 	nonces := make([]*frost.SigningNonce, len(signerIDs))
@@ -322,18 +317,17 @@ func frostSignAndVerify(t *testing.T, bn254G group.Group, f *frost.FROST, keySha
 // --------------------------------------------------------------------------
 
 func TestFullDKGRoundTrip(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// All participants should agree on the group key.
 	var groupKey group.Point
@@ -351,8 +345,9 @@ func TestFullDKGRoundTrip(t *testing.T) {
 	}
 
 	// Each participant's PK share should match secretShare * G_bn254.
+	outerG := suite.OuterGroup()
 	for id, output := range outputs {
-		expectedPK := bn254G.NewPoint().ScalarMult(output.SecretShare, bn254G.Generator())
+		expectedPK := outerG.NewPoint().ScalarMult(output.SecretShare, outerG.Generator())
 		if !output.PublicKeyShares[id].Equal(expectedPK) {
 			t.Errorf("node %d: PK share mismatch", id)
 		}
@@ -360,63 +355,63 @@ func TestFullDKGRoundTrip(t *testing.T) {
 }
 
 func TestSharesReconstructSecret(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// Use any t participants to reconstruct the secret via Lagrange interpolation in Fr.
 	subset := []int{1, 2}
 
 	// Lagrange interpolation at x=0.
-	reconstructed := bn254G.NewScalar()
+	reconstructed := outerG.NewScalar()
 	for _, i := range subset {
-		lambda := lagrangeCoeffFr(bn254G, i, subset)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+		lambda := lagrangeCoeffFr(outerG, i, subset)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed = outerG.NewScalar().Add(reconstructed, term)
 	}
 
 	// reconstructed * G should equal the group key.
-	expectedGroupKey := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+	expectedGroupKey := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 	if !expectedGroupKey.Equal(outputs[1].PublicKey) {
 		t.Error("Lagrange reconstruction does not match group key")
 	}
 
 	// Try a different subset: participants 2 and 3.
 	subset2 := []int{2, 3}
-	reconstructed2 := bn254G.NewScalar()
+	reconstructed2 := outerG.NewScalar()
 	for _, i := range subset2 {
-		lambda := lagrangeCoeffFr(bn254G, i, subset2)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed2 = bn254G.NewScalar().Add(reconstructed2, term)
+		lambda := lagrangeCoeffFr(outerG, i, subset2)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed2 = outerG.NewScalar().Add(reconstructed2, term)
 	}
-	expectedGroupKey2 := bn254G.NewPoint().ScalarMult(reconstructed2, bn254G.Generator())
+	expectedGroupKey2 := outerG.NewPoint().ScalarMult(reconstructed2, outerG.Generator())
 	if !expectedGroupKey2.Equal(outputs[1].PublicKey) {
 		t.Error("different subset Lagrange reconstruction does not match group key")
 	}
 }
 
 func TestReconstructionWithAllSubsets3of3(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 	groupKey := outputs[1].PublicKey
 
 	// All possible threshold subsets of 3 nodes with threshold 2.
@@ -427,13 +422,13 @@ func TestReconstructionWithAllSubsets3of3(t *testing.T) {
 	}
 
 	for _, subset := range subsets {
-		reconstructed := bn254G.NewScalar()
+		reconstructed := outerG.NewScalar()
 		for _, i := range subset {
-			lambda := lagrangeCoeffFr(bn254G, i, subset)
-			term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-			reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+			lambda := lagrangeCoeffFr(outerG, i, subset)
+			term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+			reconstructed = outerG.NewScalar().Add(reconstructed, term)
 		}
-		expectedGK := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+		expectedGK := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 		if !expectedGK.Equal(groupKey) {
 			t.Errorf("subset %v: Lagrange reconstruction does not match group key", subset)
 		}
@@ -445,23 +440,23 @@ func TestReconstructionWithAllSubsets3of3(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestGoldenDKGToFROSTSigning(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// Convert DKG outputs to FROST KeyShares.
 	keyShares := make(map[int]*frost.KeyShare, n)
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
@@ -469,40 +464,40 @@ func TestGoldenDKGToFROSTSigning(t *testing.T) {
 	}
 
 	// Create FROST instance for BN254.
-	f, err := frost.New(bn254G, threshold, n)
+	f, err := frost.New(outerG, threshold, n)
 	if err != nil {
 		t.Fatalf("frost.New: %v", err)
 	}
 
 	// Sign with a threshold subset.
 	msg := []byte("test message for FROST signing")
-	frostSignAndVerify(t, bn254G, f, keyShares, []int{1, 3}, msg)
+	frostSignAndVerify(t, outerG, f, keyShares, []int{1, 3}, msg)
 }
 
 func TestGoldenDKGToFROSTSigningAllSubsets(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	keyShares := make(map[int]*frost.KeyShare, n)
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
 		keyShares[p.ID] = ks
 	}
 
-	f, err := frost.New(bn254G, threshold, n)
+	f, err := frost.New(outerG, threshold, n)
 	if err != nil {
 		t.Fatalf("frost.New: %v", err)
 	}
@@ -518,7 +513,7 @@ func TestGoldenDKGToFROSTSigningAllSubsets(t *testing.T) {
 	}
 
 	for _, subset := range subsets {
-		frostSignAndVerify(t, bn254G, f, keyShares, subset, msg)
+		frostSignAndVerify(t, outerG, f, keyShares, subset, msg)
 	}
 }
 
@@ -527,18 +522,18 @@ func TestGoldenDKGToFROSTSigningAllSubsets(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestCrossFieldAccumulationN5(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 5, 3
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// All should agree on group key.
 	groupKey := outputs[1].PublicKey
@@ -550,31 +545,31 @@ func TestCrossFieldAccumulationN5(t *testing.T) {
 
 	// Verify Lagrange reconstruction with a threshold subset.
 	subset := []int{1, 3, 5}
-	reconstructed := bn254G.NewScalar()
+	reconstructed := outerG.NewScalar()
 	for _, i := range subset {
-		lambda := lagrangeCoeffFr(bn254G, i, subset)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+		lambda := lagrangeCoeffFr(outerG, i, subset)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed = outerG.NewScalar().Add(reconstructed, term)
 	}
-	expectedGK := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+	expectedGK := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 	if !expectedGK.Equal(groupKey) {
 		t.Error("n=5 t=3: Lagrange reconstruction failed")
 	}
 }
 
 func TestCrossFieldAccumulationN8(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 8, 5
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// All should agree on group key.
 	groupKey := outputs[1].PublicKey
@@ -586,13 +581,13 @@ func TestCrossFieldAccumulationN8(t *testing.T) {
 
 	// Verify Lagrange with non-contiguous subset.
 	subset := []int{1, 3, 5, 7, 8}
-	reconstructed := bn254G.NewScalar()
+	reconstructed := outerG.NewScalar()
 	for _, i := range subset {
-		lambda := lagrangeCoeffFr(bn254G, i, subset)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+		lambda := lagrangeCoeffFr(outerG, i, subset)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed = outerG.NewScalar().Add(reconstructed, term)
 	}
-	expectedGK := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+	expectedGK := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 	if !expectedGK.Equal(groupKey) {
 		t.Error("n=8 t=5: Lagrange reconstruction failed")
 	}
@@ -600,19 +595,19 @@ func TestCrossFieldAccumulationN8(t *testing.T) {
 	// Also check FROST signing with n=8 DKG.
 	keyShares := make(map[int]*frost.KeyShare, n)
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
 		keyShares[p.ID] = ks
 	}
 
-	f, err := frost.New(bn254G, threshold, n)
+	f, err := frost.New(outerG, threshold, n)
 	if err != nil {
 		t.Fatalf("frost.New: %v", err)
 	}
 
-	frostSignAndVerify(t, bn254G, f, keyShares, []int{2, 4, 5, 6, 8}, []byte("n=8 FROST signing test"))
+	frostSignAndVerify(t, outerG, f, keyShares, []int{2, 4, 5, 6, 8}, []byte("n=8 FROST signing test"))
 }
 
 // --------------------------------------------------------------------------
@@ -620,99 +615,92 @@ func TestCrossFieldAccumulationN8(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestInvalidNodeIDRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
 	badParticipant := &Participant{ID: 0} // Invalid: must be >= 1
 
-	_, err := CreateDealing(bjjG, bn254G, config, badParticipant, nil, rand.Reader)
+	_, err := CreateDealing(suite, config, badParticipant, nil, rand.Reader)
 	if err != ErrInvalidNodeID {
 		t.Errorf("expected ErrInvalidNodeID, got: %v", err)
 	}
 }
 
 func TestNegativeNodeIDRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
 	badParticipant := &Participant{ID: -1}
 
-	_, err := CreateDealing(bjjG, bn254G, config, badParticipant, nil, rand.Reader)
+	_, err := CreateDealing(suite, config, badParticipant, nil, rand.Reader)
 	if err != ErrInvalidNodeID {
 		t.Errorf("expected ErrInvalidNodeID, got: %v", err)
 	}
 }
 
 func TestPeerNodeIDZeroRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
-	self := testParticipant(t, bjjG, 1)
+	self := testParticipant(t, suite.InnerGroup(), 1)
 	badPeer := &Participant{ID: 0}
-	goodPeer := testParticipant(t, bjjG, 2)
+	goodPeer := testParticipant(t, suite.InnerGroup(), 2)
 
-	_, err := CreateDealing(bjjG, bn254G, config, self, []*Participant{badPeer, goodPeer}, rand.Reader)
+	_, err := CreateDealing(suite, config, self, []*Participant{badPeer, goodPeer}, rand.Reader)
 	if err != ErrInvalidNodeID {
 		t.Errorf("expected ErrInvalidNodeID for peer with ID 0, got: %v", err)
 	}
 }
 
 func TestDuplicateNodeIDRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
-	self := testParticipant(t, bjjG, 1)
-	peer1 := testParticipant(t, bjjG, 2)
-	peer2 := testParticipant(t, bjjG, 2) // duplicate of peer1
+	self := testParticipant(t, suite.InnerGroup(), 1)
+	peer1 := testParticipant(t, suite.InnerGroup(), 2)
+	peer2 := testParticipant(t, suite.InnerGroup(), 2) // duplicate of peer1
 
-	_, err := CreateDealing(bjjG, bn254G, config, self, []*Participant{peer1, peer2}, rand.Reader)
+	_, err := CreateDealing(suite, config, self, []*Participant{peer1, peer2}, rand.Reader)
 	if err != ErrDuplicateNodeID {
 		t.Errorf("expected ErrDuplicateNodeID, got: %v", err)
 	}
 }
 
 func TestSelfDuplicateAsPeerRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
-	self := testParticipant(t, bjjG, 1)
-	peer := testParticipant(t, bjjG, 1) // same ID as self
+	self := testParticipant(t, suite.InnerGroup(), 1)
+	peer := testParticipant(t, suite.InnerGroup(), 1) // same ID as self
 
-	_, err := CreateDealing(bjjG, bn254G, config, self, []*Participant{peer, testParticipant(t, bjjG, 2)}, rand.Reader)
+	_, err := CreateDealing(suite, config, self, []*Participant{peer, testParticipant(t, suite.InnerGroup(), 2)}, rand.Reader)
 	if err != ErrDuplicateNodeID {
 		t.Errorf("expected ErrDuplicateNodeID, got: %v", err)
 	}
 }
 
 func TestPeerCountMismatch(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
-	self := testParticipant(t, bjjG, 1)
-	peer := testParticipant(t, bjjG, 2)
+	self := testParticipant(t, suite.InnerGroup(), 1)
+	peer := testParticipant(t, suite.InnerGroup(), 2)
 
 	// Only 1 peer for N=3 (need 2).
-	_, err := CreateDealing(bjjG, bn254G, config, self, []*Participant{peer}, rand.Reader)
+	_, err := CreateDealing(suite, config, self, []*Participant{peer}, rand.Reader)
 	if err != ErrPeerCountMismatch {
 		t.Errorf("expected ErrPeerCountMismatch, got: %v", err)
 	}
 }
 
 func TestInvalidConfigRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
-	self := testParticipant(t, bjjG, 1)
+	self := testParticipant(t, suite.InnerGroup(), 1)
 
 	t.Run("ThresholdZero", func(t *testing.T) {
 		config := &DkgConfig{N: 3, T: 0}
-		_, err := CreateDealing(bjjG, bn254G, config, self, nil, rand.Reader)
+		_, err := CreateDealing(suite, config, self, nil, rand.Reader)
 		if err != ErrInvalidConfig {
 			t.Errorf("expected ErrInvalidConfig, got: %v", err)
 		}
@@ -720,7 +708,7 @@ func TestInvalidConfigRejected(t *testing.T) {
 
 	t.Run("ThresholdExceedsN", func(t *testing.T) {
 		config := &DkgConfig{N: 2, T: 3}
-		_, err := CreateDealing(bjjG, bn254G, config, self, nil, rand.Reader)
+		_, err := CreateDealing(suite, config, self, nil, rand.Reader)
 		if err != ErrInvalidConfig {
 			t.Errorf("expected ErrInvalidConfig, got: %v", err)
 		}
@@ -728,17 +716,15 @@ func TestInvalidConfigRejected(t *testing.T) {
 }
 
 func TestSessionIDMismatchRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	config := testConfig(t, 3, 2)
 	participants := make([]*Participant, 3)
 	for i := 0; i < 3; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	// Build a synthetic Round0Msg with a specific session ID.
-	// VerifyDealing checks session ID first, before any crypto.
 	var msgSID SessionID
 	if _, err := rand.Read(msgSID[:]); err != nil {
 		t.Fatal(err)
@@ -746,47 +732,48 @@ func TestSessionIDMismatchRejected(t *testing.T) {
 	msg := &Round0Msg{
 		SessionID:      msgSID,
 		From:           1,
-		VSSCommitments: []group.Point{bn254G.Generator()}, // non-identity
+		VSSCommitments: []group.Point{outerG.Generator()}, // non-identity
 	}
 
 	recipientPKs := map[int]group.Point{2: participants[1].PK, 3: participants[2].PK}
-	err := VerifyDealing(bjjG, bn254G, config, msg, participants[1], participants[0].PK, recipientPKs)
+	err := VerifyDealing(suite, config, msg, participants[1], participants[0].PK, recipientPKs)
 	if err != ErrSessionIDMismatch {
 		t.Errorf("expected ErrSessionIDMismatch, got: %v", err)
 	}
 }
 
 func TestTamperedCiphertextDetected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
 	config := testConfig(t, 3, 2)
 	participants := make([]*Participant, 3)
 	for i := 0; i < 3; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, innerG, i+1)
 	}
 
 	// Build a synthetic dealing manually (bypassing eVRF proof generation).
-	omega, err := bn254G.RandomScalar(rand.Reader)
+	omega, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poly, err := NewRandomPolynomial(bn254G, omega, config.T-1, rand.Reader)
+	poly, err := NewRandomPolynomial(outerG, omega, config.T-1, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vssCommitments, err := VSSCommit(bn254G, poly)
+	vssCommitments, err := VSSCommit(outerG, poly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(bn254G, poly, config.N)
+	shares := GenerateShares(outerG, poly, config.N)
 
-	identityProof, err := ProveIdentity(bjjG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
+	identityProof, err := ProveIdentity(innerG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	alpha, err := bn254G.HashToScalar([]byte("golden-lhl-alpha"), config.SessionID[:])
+	alpha, err := outerG.HashToScalar([]byte(lhlAlphaDomain), config.SessionID[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -797,11 +784,11 @@ func TestTamperedCiphertextDetected(t *testing.T) {
 
 	ciphertexts := make(map[int]*Ciphertext, 2)
 	for _, peer := range []*Participant{participants[1], participants[2]} {
-		padResult, err := DerivePad(bjjG, bn254G, participants[0].SK, peer.PK, sessionData, alpha)
+		padResult, err := DerivePad(suite, participants[0].SK, peer.PK, sessionData, alpha)
 		if err != nil {
 			t.Fatal(err)
 		}
-		z := bn254G.NewScalar().Add(padResult.Pad, shares[peer.ID])
+		z := outerG.NewScalar().Add(padResult.Pad, shares[peer.ID])
 		ciphertexts[peer.ID] = &Ciphertext{
 			RCommitment:    padResult.RCommitment,
 			EncryptedShare: z,
@@ -819,48 +806,49 @@ func TestTamperedCiphertextDetected(t *testing.T) {
 	}
 
 	// Tamper with the encrypted share for recipient 2.
-	one := scalarFromIntForTest(bn254G, 1)
+	one := scalarFromIntForTest(outerG, 1)
 	ct := msg.Ciphertexts[2]
-	ct.EncryptedShare = bn254G.NewScalar().Add(ct.EncryptedShare, one)
+	ct.EncryptedShare = outerG.NewScalar().Add(ct.EncryptedShare, one)
 
 	recipientPKs := map[int]group.Point{2: participants[1].PK, 3: participants[2].PK}
-	err = VerifyDealing(bjjG, bn254G, config, msg, participants[1], participants[0].PK, recipientPKs)
+	err = VerifyDealing(suite, config, msg, participants[1], participants[0].PK, recipientPKs)
 	if err == nil {
 		t.Error("expected error for tampered ciphertext, got nil")
 	}
 }
 
 func TestTamperedVSSCommitmentDetected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
 	config := testConfig(t, 3, 2)
 	participants := make([]*Participant, 3)
 	for i := 0; i < 3; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, innerG, i+1)
 	}
 
 	// Build a synthetic dealing manually.
-	omega, err := bn254G.RandomScalar(rand.Reader)
+	omega, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poly, err := NewRandomPolynomial(bn254G, omega, config.T-1, rand.Reader)
+	poly, err := NewRandomPolynomial(outerG, omega, config.T-1, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vssCommitments, err := VSSCommit(bn254G, poly)
+	vssCommitments, err := VSSCommit(outerG, poly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(bn254G, poly, config.N)
+	shares := GenerateShares(outerG, poly, config.N)
 
-	identityProof, err := ProveIdentity(bjjG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
+	identityProof, err := ProveIdentity(innerG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	alpha, err := bn254G.HashToScalar([]byte("golden-lhl-alpha"), config.SessionID[:])
+	alpha, err := outerG.HashToScalar([]byte(lhlAlphaDomain), config.SessionID[:])
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -871,11 +859,11 @@ func TestTamperedVSSCommitmentDetected(t *testing.T) {
 
 	ciphertexts := make(map[int]*Ciphertext, 2)
 	for _, peer := range []*Participant{participants[1], participants[2]} {
-		padResult, err := DerivePad(bjjG, bn254G, participants[0].SK, peer.PK, sessionData, alpha)
+		padResult, err := DerivePad(suite, participants[0].SK, peer.PK, sessionData, alpha)
 		if err != nil {
 			t.Fatal(err)
 		}
-		z := bn254G.NewScalar().Add(padResult.Pad, shares[peer.ID])
+		z := outerG.NewScalar().Add(padResult.Pad, shares[peer.ID])
 		ciphertexts[peer.ID] = &Ciphertext{
 			RCommitment:    padResult.RCommitment,
 			EncryptedShare: z,
@@ -893,31 +881,27 @@ func TestTamperedVSSCommitmentDetected(t *testing.T) {
 	}
 
 	// Tamper with VSS commitment[0] (the PK contribution).
-	// This breaks ciphertext consistency: z*G != R + (tampered)ExpectedShareCommitment.
-	msg.VSSCommitments[0] = bn254G.NewPoint().Add(
+	msg.VSSCommitments[0] = outerG.NewPoint().Add(
 		msg.VSSCommitments[0],
-		bn254G.Generator(),
+		outerG.Generator(),
 	)
 
 	recipientPKs := map[int]group.Point{2: participants[1].PK, 3: participants[2].PK}
-	err = VerifyDealing(bjjG, bn254G, config, msg, participants[1], participants[0].PK, recipientPKs)
+	err = VerifyDealing(suite, config, msg, participants[1], participants[0].PK, recipientPKs)
 	if err == nil {
 		t.Error("expected error for tampered VSS commitment, got nil")
 	}
 }
 
 func TestEmptyVSSCommitmentsRejected(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
 
 	config := testConfig(t, 3, 2)
 	participants := make([]*Participant, 3)
 	for i := 0; i < 3; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	// Build a synthetic message with empty VSS commitments.
-	// VerifyDealing checks this before identity proof or ciphertexts.
 	msg := &Round0Msg{
 		SessionID:      config.SessionID,
 		From:           1,
@@ -925,29 +909,27 @@ func TestEmptyVSSCommitmentsRejected(t *testing.T) {
 	}
 
 	recipientPKs := map[int]group.Point{2: participants[1].PK, 3: participants[2].PK}
-	err := VerifyDealing(bjjG, bn254G, config, msg, participants[1], participants[0].PK, recipientPKs)
+	err := VerifyDealing(suite, config, msg, participants[1], participants[0].PK, recipientPKs)
 	if err != ErrInvalidVSSLength {
 		t.Errorf("expected ErrInvalidVSSLength for empty VSS commitments, got: %v", err)
 	}
 }
 
 func TestCompletePeerCountMismatch(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	config := testConfig(t, 3, 2)
 	participants := make([]*Participant, 3)
 	for i := 0; i < 3; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	// Build a minimal synthetic DkgDealing (no eVRF proofs needed).
-	// Complete checks peer count before processing any dealings.
-	omega, err := bn254G.RandomScalar(rand.Reader)
+	omega, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ownShare, err := bn254G.RandomScalar(rand.Reader)
+	ownShare, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -955,7 +937,7 @@ func TestCompletePeerCountMismatch(t *testing.T) {
 		Message: &Round0Msg{
 			SessionID:      config.SessionID,
 			From:           participants[0].ID,
-			VSSCommitments: []group.Point{bn254G.NewPoint().ScalarMult(omega, bn254G.Generator())},
+			VSSCommitments: []group.Point{outerG.NewPoint().ScalarMult(omega, outerG.Generator())},
 		},
 		PrivateShare: ownShare,
 	}
@@ -967,7 +949,7 @@ func TestCompletePeerCountMismatch(t *testing.T) {
 	}
 
 	// Pass wrong number of peer dealings (0 instead of 2).
-	_, err = Complete(bjjG, bn254G, config, participants[0], dealing, nil, peerPKs)
+	_, err = Complete(suite, config, participants[0], dealing, nil, peerPKs)
 	if err != ErrPeerCountMismatch {
 		t.Errorf("expected ErrPeerCountMismatch, got: %v", err)
 	}
@@ -978,27 +960,27 @@ func TestCompletePeerCountMismatch(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestDkgOutputToKeyShareFields(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
 
 		// ID should be the scalar encoding of the participant's integer ID.
-		expectedID := scalarFromIntForTest(bn254G, p.ID)
+		expectedID := scalarFromIntForTest(outerG, p.ID)
 		if !ks.ID.Equal(expectedID) {
 			t.Errorf("node %d: ID scalar mismatch", p.ID)
 		}
@@ -1025,18 +1007,19 @@ func TestDkgOutputToKeyShareFields(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestVSSCommitmentStructure(t *testing.T) {
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	threshold := 2
-	omega, err := bn254G.RandomScalar(rand.Reader)
+	omega, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poly, err := NewRandomPolynomial(bn254G, omega, threshold-1, rand.Reader)
+	poly, err := NewRandomPolynomial(outerG, omega, threshold-1, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vssCommitments, err := VSSCommit(bn254G, poly)
+	vssCommitments, err := VSSCommit(outerG, poly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1052,34 +1035,35 @@ func TestVSSCommitmentStructure(t *testing.T) {
 	}
 
 	// VSSCommitments[0] should equal omega * G.
-	expectedPKContrib := bn254G.NewPoint().ScalarMult(omega, bn254G.Generator())
+	expectedPKContrib := outerG.NewPoint().ScalarMult(omega, outerG.Generator())
 	if !vssCommitments[0].Equal(expectedPKContrib) {
 		t.Error("VSSCommitments[0] != omega * G")
 	}
 }
 
 func TestShareConsistentWithVSS(t *testing.T) {
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
-	omega, err := bn254G.RandomScalar(rand.Reader)
+	omega, err := outerG.RandomScalar(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	poly, err := NewRandomPolynomial(bn254G, omega, threshold-1, rand.Reader)
+	poly, err := NewRandomPolynomial(outerG, omega, threshold-1, rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	vssCommitments, err := VSSCommit(bn254G, poly)
+	vssCommitments, err := VSSCommit(outerG, poly)
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(bn254G, poly, n)
+	shares := GenerateShares(outerG, poly, n)
 
 	// For each participant, f(i) * G should equal ExpectedShareCommitment(vss, i).
 	for i := 1; i <= n; i++ {
-		shareCommit := bn254G.NewPoint().ScalarMult(shares[i], bn254G.Generator())
-		expectedCommit := ExpectedShareCommitment(bn254G, vssCommitments, i)
+		shareCommit := outerG.NewPoint().ScalarMult(shares[i], outerG.Generator())
+		expectedCommit := ExpectedShareCommitment(outerG, vssCommitments, i)
 		if !shareCommit.Equal(expectedCommit) {
 			t.Errorf("node %d: share*G != ExpectedShareCommitment", i)
 		}
@@ -1091,18 +1075,18 @@ func TestShareConsistentWithVSS(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestThresholdEqualsN(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 3
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// All agree on group key.
 	groupKey := outputs[1].PublicKey
@@ -1114,13 +1098,13 @@ func TestThresholdEqualsN(t *testing.T) {
 
 	// Reconstruction requires all n shares.
 	allIDs := []int{1, 2, 3}
-	reconstructed := bn254G.NewScalar()
+	reconstructed := outerG.NewScalar()
 	for _, i := range allIDs {
-		lambda := lagrangeCoeffFr(bn254G, i, allIDs)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+		lambda := lagrangeCoeffFr(outerG, i, allIDs)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed = outerG.NewScalar().Add(reconstructed, term)
 	}
-	expectedGK := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+	expectedGK := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 	if !expectedGK.Equal(groupKey) {
 		t.Error("t=n reconstruction failed")
 	}
@@ -1131,18 +1115,18 @@ func TestThresholdEqualsN(t *testing.T) {
 // for FROST compatibility). This test uses the internal createDealingNoProofs helper
 // to verify mathematical correctness of the polynomial evaluation at the boundary.
 func TestThresholdOne(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 1
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// All agree on group key.
 	groupKey := outputs[1].PublicKey
@@ -1155,7 +1139,7 @@ func TestThresholdOne(t *testing.T) {
 	// With t=1, the polynomial is constant (f(x) = omega for all x).
 	// Every share equals the secret, so share*G = groupKey for all participants.
 	for id := 1; id <= n; id++ {
-		shareG := bn254G.NewPoint().ScalarMult(outputs[id].SecretShare, bn254G.Generator())
+		shareG := outerG.NewPoint().ScalarMult(outputs[id].SecretShare, outerG.Generator())
 		if !shareG.Equal(groupKey) {
 			t.Errorf("t=1: node %d share*G != group key", id)
 		}
@@ -1167,18 +1151,18 @@ func TestThresholdOne(t *testing.T) {
 // --------------------------------------------------------------------------
 
 func TestMinimalN2T2(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 2, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKGNoProofs(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKGNoProofs(t, suite, config, participants)
 
 	// Both agree on group key.
 	if !outputs[1].PublicKey.Equal(outputs[2].PublicKey) {
@@ -1187,13 +1171,13 @@ func TestMinimalN2T2(t *testing.T) {
 
 	// Reconstruction with both.
 	subset := []int{1, 2}
-	reconstructed := bn254G.NewScalar()
+	reconstructed := outerG.NewScalar()
 	for _, i := range subset {
-		lambda := lagrangeCoeffFr(bn254G, i, subset)
-		term := bn254G.NewScalar().Mul(lambda, outputs[i].SecretShare)
-		reconstructed = bn254G.NewScalar().Add(reconstructed, term)
+		lambda := lagrangeCoeffFr(outerG, i, subset)
+		term := outerG.NewScalar().Mul(lambda, outputs[i].SecretShare)
+		reconstructed = outerG.NewScalar().Add(reconstructed, term)
 	}
-	expectedGK := bn254G.NewPoint().ScalarMult(reconstructed, bn254G.Generator())
+	expectedGK := outerG.NewPoint().ScalarMult(reconstructed, outerG.Generator())
 	if !expectedGK.Equal(outputs[1].PublicKey) {
 		t.Error("n=2 t=2 reconstruction failed")
 	}
@@ -1201,24 +1185,23 @@ func TestMinimalN2T2(t *testing.T) {
 	// FROST signing with n=2 t=2.
 	keyShares := make(map[int]*frost.KeyShare, n)
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
 		keyShares[p.ID] = ks
 	}
 
-	f, err := frost.New(bn254G, threshold, n)
+	f, err := frost.New(outerG, threshold, n)
 	if err != nil {
 		t.Fatalf("frost.New: %v", err)
 	}
 
-	frostSignAndVerify(t, bn254G, f, keyShares, []int{1, 2}, []byte("n=2 signing test"))
+	frostSignAndVerify(t, outerG, f, keyShares, []int{1, 2}, []byte("n=2 signing test"))
 }
 
 // --------------------------------------------------------------------------
 // Full integration test (requires working eVRF PLONK circuit).
-// Skipped by default - will pass once gnark circuit compilation is fixed.
 // --------------------------------------------------------------------------
 
 func TestFullDKGWithEVRFProofs(t *testing.T) {
@@ -1226,18 +1209,18 @@ func TestFullDKGWithEVRFProofs(t *testing.T) {
 		t.Skip("eVRF PLONK proof generation is slow (~3s per proof)")
 	}
 
-	bjjG := &bjj.BJJ{}
-	bn254G := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	outerG := suite.OuterGroup()
 
 	n, threshold := 3, 2
 	config := testConfig(t, n, threshold)
 
 	participants := make([]*Participant, n)
 	for i := 0; i < n; i++ {
-		participants[i] = testParticipant(t, bjjG, i+1)
+		participants[i] = testParticipant(t, suite.InnerGroup(), i+1)
 	}
 
-	outputs := goldenRunDKG(t, bjjG, bn254G, config, participants)
+	outputs := goldenRunDKG(t, suite, config, participants)
 
 	// All participants should agree on the group key.
 	groupKey := outputs[1].PublicKey
@@ -1250,17 +1233,17 @@ func TestFullDKGWithEVRFProofs(t *testing.T) {
 	// FROST signing.
 	keyShares := make(map[int]*frost.KeyShare, n)
 	for _, p := range participants {
-		ks, err := DkgOutputToKeyShare(bn254G, p.ID, outputs[p.ID])
+		ks, err := DkgOutputToKeyShare(outerG, p.ID, outputs[p.ID])
 		if err != nil {
 			t.Fatalf("DkgOutputToKeyShare(node %d): %v", p.ID, err)
 		}
 		keyShares[p.ID] = ks
 	}
 
-	f, err := frost.New(bn254G, threshold, n)
+	f, err := frost.New(outerG, threshold, n)
 	if err != nil {
 		t.Fatalf("frost.New: %v", err)
 	}
 
-	frostSignAndVerify(t, bn254G, f, keyShares, []int{1, 3}, []byte("full integration test"))
+	frostSignAndVerify(t, outerG, f, keyShares, []int{1, 3}, []byte("full integration test"))
 }

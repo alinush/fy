@@ -386,6 +386,19 @@ func (p *CircomPoint) IsIdentity() bool {
 	return p.x.Sign() == 0 && p.y.Cmp(big.NewInt(1)) == 0
 }
 
+// Zero sets the point to the identity element (0, 1) and securely erases the
+// previous coordinate values from the underlying big.Int memory.
+func (p *CircomPoint) Zero() {
+	for _, w := range []*big.Int{p.x, p.y} {
+		words := w.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+	}
+	p.x.SetInt64(0)
+	p.y.SetInt64(1)
+}
+
 // IsInSubgroup reports whether p is in the prime-order subgroup.
 // Checks order * P == identity.
 func (p *CircomPoint) IsInSubgroup() bool {

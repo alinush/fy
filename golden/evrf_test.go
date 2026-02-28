@@ -3,34 +3,32 @@ package golden
 import (
 	"crypto/rand"
 	"testing"
-
-	"github.com/f3rmion/fy/bjj"
-	bn254g1 "github.com/f3rmion/fy/bn254g1"
 )
 
 func TestDerivePadSymmetric(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	frG := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
 	// Generate two key pairs.
-	skA, _ := bjjG.RandomScalar(rand.Reader)
-	pkA := bjjG.NewPoint().ScalarMult(skA, bjjG.Generator())
+	skA, _ := innerG.RandomScalar(rand.Reader)
+	pkA := innerG.NewPoint().ScalarMult(skA, innerG.Generator())
 
-	skB, _ := bjjG.RandomScalar(rand.Reader)
-	pkB := bjjG.NewPoint().ScalarMult(skB, bjjG.Generator())
+	skB, _ := innerG.RandomScalar(rand.Reader)
+	pkB := innerG.NewPoint().ScalarMult(skB, innerG.Generator())
 
 	// Session data and alpha.
 	sessionData := [][]byte{[]byte("test-session"), []byte("round-0")}
-	alpha, _ := frG.HashToScalar([]byte("golden-lhl-alpha"), []byte("test"))
+	alpha, _ := outerG.HashToScalar([]byte(lhlAlphaDomain), []byte("test"))
 
 	// DerivePad from A's perspective.
-	padA, err := DerivePad(bjjG, frG, skA, pkB, sessionData, alpha)
+	padA, err := DerivePad(suite, skA, pkB, sessionData, alpha)
 	if err != nil {
 		t.Fatalf("DerivePad(A->B): %v", err)
 	}
 
 	// DerivePad from B's perspective.
-	padB, err := DerivePad(bjjG, frG, skB, pkA, sessionData, alpha)
+	padB, err := DerivePad(suite, skB, pkA, sessionData, alpha)
 	if err != nil {
 		t.Fatalf("DerivePad(B->A): %v", err)
 	}
@@ -47,22 +45,23 @@ func TestDerivePadSymmetric(t *testing.T) {
 }
 
 func TestDerivePadDifferentPeers(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	frG := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
-	skA, _ := bjjG.RandomScalar(rand.Reader)
+	skA, _ := innerG.RandomScalar(rand.Reader)
 
-	skB, _ := bjjG.RandomScalar(rand.Reader)
-	pkB := bjjG.NewPoint().ScalarMult(skB, bjjG.Generator())
+	skB, _ := innerG.RandomScalar(rand.Reader)
+	pkB := innerG.NewPoint().ScalarMult(skB, innerG.Generator())
 
-	skC, _ := bjjG.RandomScalar(rand.Reader)
-	pkC := bjjG.NewPoint().ScalarMult(skC, bjjG.Generator())
+	skC, _ := innerG.RandomScalar(rand.Reader)
+	pkC := innerG.NewPoint().ScalarMult(skC, innerG.Generator())
 
 	sessionData := [][]byte{[]byte("session")}
-	alpha, _ := frG.HashToScalar([]byte("golden-lhl-alpha"), []byte("test"))
+	alpha, _ := outerG.HashToScalar([]byte(lhlAlphaDomain), []byte("test"))
 
-	padAB, _ := DerivePad(bjjG, frG, skA, pkB, sessionData, alpha)
-	padAC, _ := DerivePad(bjjG, frG, skA, pkC, sessionData, alpha)
+	padAB, _ := DerivePad(suite, skA, pkB, sessionData, alpha)
+	padAC, _ := DerivePad(suite, skA, pkC, sessionData, alpha)
 
 	if padAB.Pad.Equal(padAC.Pad) {
 		t.Error("pads for different peers should differ")
@@ -70,17 +69,18 @@ func TestDerivePadDifferentPeers(t *testing.T) {
 }
 
 func TestDerivePadDifferentSessions(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	frG := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
-	skA, _ := bjjG.RandomScalar(rand.Reader)
-	skB, _ := bjjG.RandomScalar(rand.Reader)
-	pkB := bjjG.NewPoint().ScalarMult(skB, bjjG.Generator())
+	skA, _ := innerG.RandomScalar(rand.Reader)
+	skB, _ := innerG.RandomScalar(rand.Reader)
+	pkB := innerG.NewPoint().ScalarMult(skB, innerG.Generator())
 
-	alpha, _ := frG.HashToScalar([]byte("golden-lhl-alpha"), []byte("test"))
+	alpha, _ := outerG.HashToScalar([]byte(lhlAlphaDomain), []byte("test"))
 
-	pad1, _ := DerivePad(bjjG, frG, skA, pkB, [][]byte{[]byte("session-1")}, alpha)
-	pad2, _ := DerivePad(bjjG, frG, skA, pkB, [][]byte{[]byte("session-2")}, alpha)
+	pad1, _ := DerivePad(suite, skA, pkB, [][]byte{[]byte("session-1")}, alpha)
+	pad2, _ := DerivePad(suite, skA, pkB, [][]byte{[]byte("session-2")}, alpha)
 
 	if pad1.Pad.Equal(pad2.Pad) {
 		t.Error("pads for different sessions should differ")
@@ -88,38 +88,40 @@ func TestDerivePadDifferentSessions(t *testing.T) {
 }
 
 func TestDerivePadDegenerateDH(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	frG := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
-	sk, _ := bjjG.RandomScalar(rand.Reader)
-	identity := bjjG.NewPoint() // identity point
+	sk, _ := innerG.RandomScalar(rand.Reader)
+	identity := innerG.NewPoint() // identity point
 
-	alpha, _ := frG.HashToScalar([]byte("alpha"))
+	alpha, _ := outerG.HashToScalar([]byte("alpha"))
 
-	_, err := DerivePad(bjjG, frG, sk, identity, [][]byte{[]byte("session")}, alpha)
+	_, err := DerivePad(suite, sk, identity, [][]byte{[]byte("session")}, alpha)
 	if err != ErrDegenerateDH {
 		t.Errorf("expected ErrDegenerateDH, got %v", err)
 	}
 }
 
 func TestDerivePadRCommitmentConsistent(t *testing.T) {
-	bjjG := &bjj.BJJ{}
-	frG := &bn254g1.BN254G1{}
+	suite := NewBN254BJJSuite()
+	innerG := suite.InnerGroup()
+	outerG := suite.OuterGroup()
 
-	skA, _ := bjjG.RandomScalar(rand.Reader)
-	skB, _ := bjjG.RandomScalar(rand.Reader)
-	pkB := bjjG.NewPoint().ScalarMult(skB, bjjG.Generator())
+	skA, _ := innerG.RandomScalar(rand.Reader)
+	skB, _ := innerG.RandomScalar(rand.Reader)
+	pkB := innerG.NewPoint().ScalarMult(skB, innerG.Generator())
 
-	alpha, _ := frG.HashToScalar([]byte("golden-lhl-alpha"), []byte("test"))
+	alpha, _ := outerG.HashToScalar([]byte(lhlAlphaDomain), []byte("test"))
 	sessionData := [][]byte{[]byte("session")}
 
-	result, err := DerivePad(bjjG, frG, skA, pkB, sessionData, alpha)
+	result, err := DerivePad(suite, skA, pkB, sessionData, alpha)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Verify R = pad * G_bn254.
-	expectedR := frG.NewPoint().ScalarMult(result.Pad, frG.Generator())
+	expectedR := outerG.NewPoint().ScalarMult(result.Pad, outerG.Generator())
 	if !result.RCommitment.Equal(expectedR) {
 		t.Error("R commitment is not pad * G")
 	}

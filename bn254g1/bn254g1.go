@@ -268,6 +268,19 @@ func (p *Point) IsIdentity() bool {
 	return p.inner.IsInfinity()
 }
 
+// Zero sets the point to the identity (point at infinity) and securely erases
+// the previous coordinate values from the underlying fp.Element memory.
+func (p *Point) Zero() {
+	// G1Affine stores X, Y as fp.Element ([4]uint64 each).
+	for i := range p.inner.X {
+		p.inner.X[i] = 0
+	}
+	for i := range p.inner.Y {
+		p.inner.Y[i] = 0
+	}
+	// Zero value of G1Affine is the point at infinity.
+}
+
 // BN254G1 implements [group.Group] for the BN254 G1 curve.
 //
 // BN254G1 is a zero-sized type that provides access to BN254 G1 curve

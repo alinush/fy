@@ -72,6 +72,11 @@ type Point interface {
 	Equal(b Point) bool
 	// IsIdentity reports whether the receiver is the identity element.
 	IsIdentity() bool
+	// Zero sets the receiver to the identity element and securely erases the
+	// previous coordinate values from underlying memory. Use this when zeroing
+	// intermediate curve points that held secret-derived data (e.g., DH shared
+	// secrets) to prevent memory residue.
+	Zero()
 }
 
 // Group defines a cryptographic group suitable for use with FROST threshold

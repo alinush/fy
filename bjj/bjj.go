@@ -302,6 +302,20 @@ func (p *Point) IsInSubgroup() bool {
 	return check.IsZero()
 }
 
+// Zero sets the point to the identity element (0, 1) and securely erases the
+// previous coordinate values from the underlying fr.Element memory.
+func (p *Point) Zero() {
+	// Overwrite the internal limbs of both coordinates before resetting.
+	for i := range p.inner.X {
+		p.inner.X[i] = 0
+	}
+	for i := range p.inner.Y {
+		p.inner.Y[i] = 0
+	}
+	p.inner.X.SetZero()
+	p.inner.Y.SetOne()
+}
+
 // BJJ implements [group.Group] for the Baby Jubjub curve.
 //
 // BJJ is a zero-sized type that provides access to Baby Jubjub curve

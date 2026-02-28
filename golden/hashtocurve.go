@@ -9,7 +9,6 @@ import (
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/consensys/gnark-crypto/ecc/bn254/twistededwards"
 	"github.com/f3rmion/fy/bjj"
-	"github.com/f3rmion/fy/group"
 )
 
 const (
@@ -21,24 +20,6 @@ const (
 	// Must not exceed 256 (counter is a single byte).
 	maxHashAttempts = 256
 )
-
-// H1 hashes data to a Baby Jubjub curve point using domain "golden-evrf-h1".
-// The result is guaranteed to be in the prime-order subgroup (cofactor-cleared).
-//
-// IMPORTANT: This function uses try-and-increment which is NOT constant-time.
-// It must only be called with public inputs (session data, not secrets).
-func H1(g group.Group, data ...[]byte) (group.Point, error) {
-	return hashToCurveTryAndIncrement(h1Domain, data...)
-}
-
-// H2 hashes data to a Baby Jubjub curve point using domain "golden-evrf-h2".
-// The result is guaranteed to be in the prime-order subgroup (cofactor-cleared).
-//
-// IMPORTANT: This function uses try-and-increment which is NOT constant-time.
-// It must only be called with public inputs (session data, not secrets).
-func H2(g group.Group, data ...[]byte) (group.Point, error) {
-	return hashToCurveTryAndIncrement(h2Domain, data...)
-}
 
 // hashToCurveTryAndIncrement maps arbitrary data to a Baby Jubjub curve point
 // using the try-and-increment method with SHA-256.

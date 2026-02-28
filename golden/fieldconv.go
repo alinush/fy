@@ -1,6 +1,8 @@
 package golden
 
 import (
+	"fmt"
+
 	"github.com/f3rmion/fy/group"
 )
 
@@ -16,7 +18,7 @@ func extractXAsFr(bn254Group group.Group, bjjPoint group.Point) (group.Scalar, e
 	}
 	xb, ok := bjjPoint.(xByteser)
 	if !ok {
-		panic("golden: bjjPoint does not implement XBytes()")
+		return nil, fmt.Errorf("golden: extractXAsFr: point %T does not implement XBytes()", bjjPoint)
 	}
 	s := bn254Group.NewScalar()
 	return s.SetBytes(xb.XBytes())

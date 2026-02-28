@@ -6,9 +6,15 @@ import (
 	"github.com/f3rmion/fy/group"
 )
 
-// MaxNodeID is the maximum allowed NodeID value.
-// NodeIDs are encoded as uint32 in scalar representations, so this prevents overflow.
-const MaxNodeID = 1<<31 - 1 // math.MaxInt32
+const (
+	// MaxNodeID is the maximum allowed NodeID value.
+	// NodeIDs are encoded as uint32 in scalar representations, so this prevents overflow.
+	MaxNodeID = 1<<31 - 1 // math.MaxInt32
+
+	// lhlAlphaDomain is the domain separator for deriving the LHL combination
+	// coefficient alpha in the eVRF pad construction.
+	lhlAlphaDomain = "golden-lhl-alpha"
+)
 
 // SessionID uniquely identifies a DKG session.
 type SessionID [32]byte
@@ -30,27 +36,27 @@ type DkgConfig struct {
 // Participant holds a node's identity and key material.
 type Participant struct {
 	ID NodeID
-	SK group.Scalar // BJJ secret key
-	PK group.Point  // BJJ public key = SK * G_bjj
+	SK group.Scalar // inner-curve secret key
+	PK group.Point  // inner-curve public key = SK * G_inner
 }
 
 // Ciphertext is an encrypted share from dealer to recipient.
 type Ciphertext struct {
-	// RCommitment is the pad commitment: pad * G_bn254.
+	// RCommitment is the pad commitment: pad * G_outer.
 	RCommitment group.Point
 	// EncryptedShare is z = pad + share in Fr.
 	EncryptedShare group.Scalar
 }
 
 // Round0Msg is the broadcast message from a dealer in the non-interactive DKG.
-// VSSCommitments[0] = omega * G_bn254 serves as the PK contribution for the group key.
+// VSSCommitments[0] = omega * G_outer serves as the PK contribution for the group key.
 type Round0Msg struct {
 	SessionID      SessionID
 	From           NodeID
 	RandomMsg      [32]byte
-	VSSCommitments []group.Point       // BN254 G1 commitments to polynomial coefficients
+	VSSCommitments []group.Point       // outer-group commitments to polynomial coefficients
 	Ciphertexts    map[int]*Ciphertext // keyed by recipient NodeID
-	IdentityProof  *IdentityProof      // Schnorr proof of BJJ PK ownership
+	IdentityProof  *IdentityProof      // Schnorr proof of inner-curve PK ownership
 	EVRFProofs     map[int][]byte      // keyed by recipient NodeID, serialized PLONK proofs
 }
 
@@ -97,6 +103,7 @@ var (
 	ErrExtraEVRFProofs         = errors.New("golden: unexpected extra eVRF proofs in dealing")
 	ErrNilIdentityProof        = errors.New("golden: nil identity proof in dealing")
 	ErrNilCiphertext           = errors.New("golden: nil ciphertext entry in dealing")
+	ErrNilSuite                = errors.New("golden: nil CurveSuite")
 )
 
 // Zero zeroes the secret material in DkgOutput.
