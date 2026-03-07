@@ -16,7 +16,7 @@ func runFullDKG(t *testing.T, threshold, shareCount uint8) []*sign.Party {
 
 	n := int(shareCount)
 	params := Parameters{Threshold: threshold, ShareCount: shareCount}
-	sessionID := []byte(fmt.Sprintf("test-dkg-%dof%d", threshold, shareCount))
+	sessionID := []byte(fmt.Sprintf("test-dkg-%dof%d-padded", threshold, shareCount))
 
 	data := make([]*SessionData, n)
 	for i := range n {
@@ -158,7 +158,7 @@ func runReshare(
 	}
 
 	// Stage B: New committee collects and runs DKG Phase2-4.
-	newSessionID := []byte(fmt.Sprintf("reshare-%dof%d", newThreshold, newShareCount))
+	newSessionID := []byte(fmt.Sprintf("reshare-%dof%d-padded", newThreshold, newShareCount))
 	newParams := Parameters{Threshold: newThreshold, ShareCount: newShareCount}
 
 	newData := make([]*SessionData, numNew)

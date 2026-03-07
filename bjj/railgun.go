@@ -21,8 +21,15 @@ var base8X, base8Y *big.Int
 var inv8 *big.Int
 
 func init() {
-	base8X, _ = new(big.Int).SetString("5299619240641551281634865583518297030282874472190772894086521144482721001553", 10)
-	base8Y, _ = new(big.Int).SetString("16950150798460657717958625567821834550301663161624707787222815936182638968203", 10)
+	var ok bool
+	base8X, ok = new(big.Int).SetString("5299619240641551281634865583518297030282874472190772894086521144482721001553", 10)
+	if !ok {
+		panic("railgun: invalid Base8 X coordinate constant")
+	}
+	base8Y, ok = new(big.Int).SetString("16950150798460657717958625567821834550301663161624707787222815936182638968203", 10)
+	if !ok {
+		panic("railgun: invalid Base8 Y coordinate constant")
+	}
 
 	// Compute inv(8, subOrder)
 	// subOrder = 2736030358979909402780800718157159386076813972158567259200215660948447373041
@@ -94,6 +101,11 @@ func (g *RailgunBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 func (g *RailgunBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	hashWith := func(counter byte) []byte {
 		h := sha256.New()
+		// Domain separator: prevent cross-curve hash collisions.
+		// RailgunBJJ uses the same BJJ domain as BJJ since they share
+		// the same curve and order; the generator difference is irrelevant
+		// to scalar hashing.
+		h.Write([]byte("BJJ"))
 		for _, d := range data {
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
@@ -115,7 +127,7 @@ func (g *RailgunBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 }
 
 // Order returns the order of the Baby Jubjub curve's prime-order subgroup
-// as a big-endian byte slice.
+// as a big-endian byte slice. Returns a fresh copy of the group order.
 func (g *RailgunBJJ) Order() []byte {
 	return curveOrder.Bytes()
 }

@@ -29,14 +29,20 @@ func TestVSSCommitAndVerify(t *testing.T) {
 
 	// Generate shares and verify each against VSS commitments.
 	n := 5
-	shares := GenerateShares(g, poly, n)
+	shares, err := GenerateShares(g, poly, n)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	for i := 1; i <= n; i++ {
 		share := shares[i]
 
 		// share * G should equal ExpectedShareCommitment.
 		shareCommit := g.NewPoint().ScalarMult(share, g.Generator())
-		expected := ExpectedShareCommitment(g, commitments, i)
+		expected, err := ExpectedShareCommitment(g, commitments, i)
+		if err != nil {
+			t.Fatal(err)
+		}
 
 		if !shareCommit.Equal(expected) {
 			t.Errorf("share %d: commitment mismatch", i)
@@ -55,14 +61,23 @@ func TestVSSTamperedShareRejected(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	shares := GenerateShares(g, poly, 3)
+	shares, err := GenerateShares(g, poly, 3)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Tamper with share 1.
-	one := scalarFromInt(g, 1)
+	one, err := scalarFromInt(g, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tamperedShare := g.NewScalar().Add(shares[1], one)
 
 	tamperedCommit := g.NewPoint().ScalarMult(tamperedShare, g.Generator())
-	expected := ExpectedShareCommitment(g, commitments, 1)
+	expected, err := ExpectedShareCommitment(g, commitments, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	if tamperedCommit.Equal(expected) {
 		t.Error("tampered share should not match VSS commitment")

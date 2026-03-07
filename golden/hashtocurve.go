@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"math/big"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
@@ -23,6 +24,12 @@ const (
 
 // hashToCurveTryAndIncrement maps arbitrary data to a Baby Jubjub curve point
 // using the try-and-increment method with SHA-256.
+//
+// WARNING: This function uses try-and-increment which is NOT constant-time.
+// The number of iterations depends on the input, leaking information via
+// timing. For production use cases requiring constant-time hash-to-curve,
+// consider Elligator 2 (RFC 9380). This is acceptable here because the
+// session data inputs are public.
 //
 // Algorithm:
 //  1. For counter = 0, 1, 2, ...:
@@ -128,7 +135,11 @@ func hashToCurveTryAndIncrement(domain string, data ...[]byte) (*bjj.Point, erro
 			continue
 		}
 
-		return bjj.NewPointFromAffine(p8), nil
+		pt, err := bjj.NewPointFromAffine(p8)
+		if err != nil {
+			return nil, fmt.Errorf("golden: NewPointFromAffine: %w", err)
+		}
+		return pt, nil
 	}
 
 	return nil, errors.New("golden: hash-to-curve failed after maximum attempts")

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/f3rmion/fy/frost"
 	"github.com/f3rmion/fy/group"
@@ -12,6 +13,7 @@ import (
 // Participant manages a single participant's state throughout DKG and signing
 // ceremonies. Create instances using [NewParticipant].
 type Participant struct {
+	mu        sync.Mutex
 	id        int
 	frost     *frost.FROST
 	group     group.Group
@@ -109,12 +111,19 @@ func (p *Participant) ID() int {
 
 // KeyShare returns this participant's key share after DKG completion.
 // Returns nil if DKG has not been finalized.
+//
+// Note: this returns the internal pointer. Callers must not modify the
+// returned value concurrently with signing or DKG operations.
 func (p *Participant) KeyShare() *frost.KeyShare {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.keyShare
 }
 
 // FROST returns the underlying FROST instance for advanced use cases.
 func (p *Participant) FROST() *frost.FROST {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.frost
 }
 
@@ -127,6 +136,9 @@ func (p *Participant) FROST() *frost.FROST {
 // The broadcast should be sent to all participants. Each private share
 // should be sent only to its intended recipient over a secure channel.
 func (p *Participant) GenerateRound1(rng io.Reader, allParticipantIDs []int) (*Round1Output, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgState != nil {
 		return nil, errors.New("round 1 already generated")
 	}
@@ -167,11 +179,28 @@ func (p *Participant) GenerateRound1(rng io.Reader, allParticipantIDs []int) (*R
 //   - Broadcasts from ALL participants (including this one)
 //   - Private shares from all OTHER participants
 func (p *Participant) ProcessRound1(input *Round1Input) (*DKGResult, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgState == nil {
-		return nil, errors.New("must call GenerateRound1 before ProcessRound1")
+		return nil, fmt.Errorf("participant %d: must call GenerateRound1 before ProcessRound1", p.id)
 	}
 	if p.finalized {
-		return nil, errors.New("DKG already finalized")
+		return nil, fmt.Errorf("participant %d: DKG already finalized", p.id)
+	}
+
+	// Validate broadcast count: must match the total number of participants.
+	if len(input.Broadcasts) != p.frost.Total() {
+		return nil, fmt.Errorf("participant %d: expected %d broadcasts, got %d",
+			p.id, p.frost.Total(), len(input.Broadcasts))
+	}
+
+	// Validate private share count: must be exactly total - 1
+	// (one from each other participant; this participant does not send to itself).
+	expectedShares := p.frost.Total() - 1
+	if len(input.PrivateShares) != expectedShares {
+		return nil, fmt.Errorf("participant %d: expected %d private shares, got %d",
+			p.id, expectedShares, len(input.PrivateShares))
 	}
 
 	// Build a map of broadcasts by sender ID for lookup
@@ -179,7 +208,8 @@ func (p *Participant) ProcessRound1(input *Round1Input) (*DKGResult, error) {
 	for _, b := range input.Broadcasts {
 		key := string(b.ID.Bytes())
 		if _, exists := broadcastByID[key]; exists {
-			return nil, fmt.Errorf("duplicate broadcast from participant")
+			senderID, _ := scalarToInt(b.ID)
+			return nil, fmt.Errorf("participant %d: duplicate broadcast from participant %d", p.id, senderID)
 		}
 		broadcastByID[key] = b
 	}
@@ -188,12 +218,14 @@ func (p *Participant) ProcessRound1(input *Round1Input) (*DKGResult, error) {
 	for _, share := range input.PrivateShares {
 		senderBroadcast, ok := broadcastByID[string(share.FromID.Bytes())]
 		if !ok {
-			return nil, fmt.Errorf("missing broadcast from sender of private share")
+			senderID, _ := scalarToInt(share.FromID)
+			return nil, fmt.Errorf("participant %d: missing broadcast from sender %d of private share", p.id, senderID)
 		}
 
 		err := p.frost.Round2ReceiveShare(p.dkgState, share, senderBroadcast.Commitments)
 		if err != nil {
-			return nil, fmt.Errorf("invalid share from participant: %w", err)
+			senderID, _ := scalarToInt(share.FromID)
+			return nil, fmt.Errorf("participant %d: invalid share from participant %d: %w", p.id, senderID, err)
 		}
 	}
 
@@ -229,9 +261,15 @@ func (p *Participant) ProcessRound1(input *Round1Input) (*DKGResult, error) {
 
 // SetKeyShare allows setting a previously-saved key share.
 // Use this when restoring a participant from persistent storage.
-func (p *Participant) SetKeyShare(ks *frost.KeyShare) {
+func (p *Participant) SetKeyShare(ks *frost.KeyShare) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if ks == nil {
+		return errors.New("key share cannot be nil")
+	}
 	p.keyShare = ks
 	p.finalized = true
+	return nil
 }
 
 // scalarToInt extracts the integer value from a scalar.
@@ -240,7 +278,7 @@ func (p *Participant) SetKeyShare(ks *frost.KeyShare) {
 func scalarToInt(s group.Scalar) (int, error) {
 	b := s.Bytes()
 	if len(b) == 0 {
-		return 0, nil
+		return 0, errors.New("scalarToInt: empty scalar (invalid participant ID)")
 	}
 	// Verify no significant bytes beyond the last 4 (participant IDs should be small)
 	start := len(b) - 4
@@ -256,6 +294,9 @@ func scalarToInt(s group.Scalar) (int, error) {
 	n := 0
 	for _, v := range b[start:] {
 		n = n<<8 | int(v)
+	}
+	if n == 0 {
+		return 0, errors.New("scalarToInt: zero is not a valid participant ID")
 	}
 	return n, nil
 }

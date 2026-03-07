@@ -1,10 +1,8 @@
-// Package ot implements Oblivious Transfer protocols for DKLs23.
-// It uses the endemic OT protocol from Zhou et al. (https://eprint.iacr.org/2022/1525.pdf)
-// as suggested in DKLs23.
 package ot
 
 import (
 	"errors"
+	"math"
 	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
@@ -49,6 +47,13 @@ func NewSender(sessionID []byte) (*Sender, error) {
 	}, nil
 }
 
+// Zero securely erases the sender's secret scalar.
+func (s *Sender) Zero() {
+	if s.S != nil {
+		s.S.Zero()
+	}
+}
+
 // Phase1 returns the DLogProof to be sent to the receiver
 func (s *Sender) Phase1() *dkls23.DLogProof {
 	return s.Proof
@@ -61,7 +66,11 @@ func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof)
 	hScalar := dkls23.HashAsScalar(msgForH, sessionID)
 	h := dkls23.ScalarBaseMult(hScalar)
 
-	// Verify the encryption proof
+	// Verify the encryption proof.
+	// NOTE: The EncProof is bound to the session ID via the Fiat-Shamir challenge
+	// (HashAsScalar uses sessionID as salt). Session ID uniqueness is assumed;
+	// callers must ensure each protocol execution uses a distinct session ID
+	// to prevent cross-session proof replay.
 	sid := slices.Concat(sessionID, []byte("EncProof"))
 	if !encProof.Verify(sid) {
 		return m0, m1, ErrOTFailed
@@ -93,6 +102,9 @@ func (s *Sender) Phase2(sessionID []byte, seed *Seed, encProof *dkls23.EncProof)
 // Phase2Batch processes multiple encryption proofs from the receiver
 func (s *Sender) Phase2Batch(sessionID []byte, seed *Seed, encProofs []*dkls23.EncProof) ([]dkls23.HashOutput, []dkls23.HashOutput, error) {
 	batchSize := len(encProofs)
+	if batchSize > math.MaxUint16 {
+		return nil, nil, errors.New("batch size exceeds uint16 maximum; session ID counter would wrap")
+	}
 	vecM0 := make([]dkls23.HashOutput, batchSize)
 	vecM1 := make([]dkls23.HashOutput, batchSize)
 
@@ -125,8 +137,9 @@ func NewReceiver() (*Receiver, error) {
 	return &Receiver{Seed: s}, nil
 }
 
-// Phase1 generates the receiver's data for the given choice bit
-// Returns the secret scalar r (to keep), the EncProof (to send), and an error
+// Phase1 generates the receiver's data for the given choice bit.
+// Returns the secret scalar r (to keep), the EncProof (to send), and an error.
+// The caller MUST zero the returned scalar after use (e.g., via Phase2Step2 or Phase2Batch).
 func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.EncProof, error) {
 	// Sample random r
 	rScalar, err := dkls23.RandomScalar()
@@ -152,6 +165,9 @@ func (r *Receiver) Phase1(sessionID []byte, bit bool) (group.Scalar, *dkls23.Enc
 // Phase1Batch generates receiver data for multiple choice bits
 func (r *Receiver) Phase1Batch(sessionID []byte, bits []bool) ([]group.Scalar, []*dkls23.EncProof, error) {
 	batchSize := len(bits)
+	if batchSize > math.MaxUint16 {
+		return nil, nil, errors.New("batch size exceeds uint16 maximum; session ID counter would wrap")
+	}
 	vecR := make([]group.Scalar, batchSize)
 	vecProof := make([]*dkls23.EncProof, batchSize)
 
@@ -178,16 +194,35 @@ func (r *Receiver) Phase2Step1(sessionID []byte, dlogProof *dkls23.DLogProof) (g
 	return dlogProof.Point, nil
 }
 
-// Phase2Step2 computes the receiver's output message
+// Phase2Step2 computes the receiver's output message.
+// The rScalar is zeroed after use to prevent secret leakage.
 func (r *Receiver) Phase2Step2(sessionID []byte, rScalar group.Scalar, z group.Point) dkls23.HashOutput {
 	// Compute m_b = H("Sender" || r * z)
 	valueForMb := dkls23.ScalarMult(z, rScalar)
 	msgForMb := slices.Concat([]byte("Sender"), dkls23.PointToBytes(valueForMb))
+
+	// Zero the secret scalar after use.
+	rScalar.Zero()
+
 	return dkls23.Hash(msgForMb, sessionID)
 }
 
-// Phase2Batch verifies the proof and computes outputs for all scalars
+// Phase2Batch verifies the proof and computes outputs for all scalars.
+// The vecR scalars are zeroed after use to prevent secret leakage.
 func (r *Receiver) Phase2Batch(sessionID []byte, vecR []group.Scalar, dlogProof *dkls23.DLogProof) ([]dkls23.HashOutput, error) {
+	if len(vecR) > math.MaxUint16 {
+		return nil, errors.New("batch size exceeds uint16 maximum; session ID counter would wrap")
+	}
+
+	// Zero secret r scalars after computing outputs.
+	defer func() {
+		for _, rScalar := range vecR {
+			if rScalar != nil {
+				rScalar.Zero()
+			}
+		}
+	}()
+
 	// Step 1: Verify the proof
 	z, err := r.Phase2Step1(sessionID, dlogProof)
 	if err != nil {
@@ -207,9 +242,20 @@ func (r *Receiver) Phase2Batch(sessionID []byte, vecR []group.Scalar, dlogProof 
 	return vecMb, nil
 }
 
-// GetSeed returns the receiver's seed (to be sent to the sender)
+// Zero securely erases the receiver's seed.
+func (r *Receiver) Zero() {
+	for i := range r.Seed {
+		r.Seed[i] = 0
+	}
+}
+
+// GetSeed returns a copy of the receiver's seed (to be sent to the sender).
+// A copy is returned so that zeroing the Receiver does not invalidate
+// seed values already transmitted to the counterparty.
 func (r *Receiver) GetSeed() *Seed {
-	return &r.Seed
+	s := new(Seed)
+	*s = r.Seed
+	return s
 }
 
 // uint16ToBytes converts a uint16 to big-endian bytes

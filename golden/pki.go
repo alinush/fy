@@ -60,6 +60,9 @@ func VerifyIdentity(g group.Group, pk group.Point, sessionID SessionID, proof *I
 		return err
 	}
 
+	// This comparison is not constant-time, which is acceptable because both
+	// cprime and proof.Challenge are publicly derivable from the proof transcript
+	// (R, PK, sessionID). No secret information leaks through timing.
 	if !cprime.Equal(proof.Challenge) {
 		return ErrIdentityProofFailed
 	}

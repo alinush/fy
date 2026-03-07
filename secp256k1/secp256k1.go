@@ -7,15 +7,24 @@
 package secp256k1
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/f3rmion/fy/group"
+)
+
+// Compile-time interface checks.
+var (
+	_ group.Group  = (*Secp256k1)(nil)
+	_ group.Scalar = (*Scalar)(nil)
+	_ group.Point  = (*Point)(nil)
 )
 
 // Scalar represents an element of the secp256k1 scalar field.
@@ -91,16 +100,59 @@ func (s *Scalar) Negate(a group.Scalar) group.Scalar {
 // Invert sets s to a^(-1) (mod n) and returns s.
 // Returns an error if a is zero, as zero has no multiplicative inverse.
 //
-// Note: This uses dcrd's InverseValNonConst which is not constant-time.
-// In FROST, this is used for Lagrange coefficient computation where the
-// input (denominator of Lagrange basis) is derived from public participant
-// IDs, not secret values, so timing leakage is acceptable.
+// Uses blinding to mitigate timing leaks from dcrd's InverseValNonConst:
+// a^(-1) = r * (r*a)^(-1), where r is a random blinding factor.
+// This prevents the non-constant-time inversion from leaking information
+// about the input value through timing side channels.
+//
+// Returns an error if the CSPRNG fails, rather than falling back to
+// unblinded inversion which would leak timing information about the input.
 func (s *Scalar) Invert(a group.Scalar) (group.Scalar, error) {
 	aScalar := assertScalar(a)
 	if aScalar.inner.IsZero() {
 		return nil, errors.New("cannot invert zero scalar")
 	}
-	s.inner.InverseValNonConst(&aScalar.inner)
+
+	// Blind the input: compute r * a, then invert, then multiply by r.
+	// This hides the relationship between timing and the secret input.
+	var r secp256k1.ModNScalar
+	var rBytes [32]byte
+	defer func() {
+		for i := range rBytes {
+			rBytes[i] = 0
+		}
+	}()
+	if _, err := rand.Read(rBytes[:]); err != nil {
+		return nil, fmt.Errorf("scalar inversion failed: randomness unavailable: %w", err)
+	}
+	overflow := r.SetBytes(&rBytes)
+	if overflow != 0 || r.IsZero() {
+		// Extremely unlikely: retry once with fresh randomness.
+		if _, err := rand.Read(rBytes[:]); err != nil {
+			return nil, fmt.Errorf("scalar inversion failed: randomness unavailable on retry: %w", err)
+		}
+		overflow2 := r.SetBytes(&rBytes)
+		if overflow2 != 0 || r.IsZero() {
+			return nil, errors.New("scalar inversion failed: could not generate valid blinding factor after 2 attempts")
+		}
+	}
+
+	// ra = r * a
+	var ra secp256k1.ModNScalar
+	ra.Mul2(&r, &aScalar.inner)
+
+	// raInv = (r * a)^(-1)  — only InverseValNonConst call, on blinded product
+	var raInv secp256k1.ModNScalar
+	raInv.InverseValNonConst(&ra)
+
+	// s = r * (r * a)^(-1) = a^(-1)
+	s.inner.Mul2(&r, &raInv)
+
+	// Zero intermediate secret values.
+	r.Zero()
+	ra.Zero()
+	raInv.Zero()
+
 	return s, nil
 }
 
@@ -118,7 +170,10 @@ func (s *Scalar) Bytes() []byte {
 	return bytes[:]
 }
 
-// SetBytes sets s from a big-endian byte slice and returns s.
+// SetBytes sets the scalar from a big-endian byte slice, reducing modulo the
+// group order. Values >= n are silently reduced. Use SetBytesCanonical for
+// strict canonical-only acceptance.
+//
 // Inputs must be at most 32 bytes; the value is right-aligned (zero-padded on the left).
 // The 32-byte value is then reduced modulo the curve order by dcrd's SetBytes.
 // Callers needing modular reduction of larger values (e.g., hash-to-field with
@@ -135,6 +190,7 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 }
 
 // Equal reports whether s and b represent the same scalar value.
+// dcrd's Equals appears constant-time but is not documented as such.
 func (s *Scalar) Equal(b group.Scalar) bool {
 	bScalar := assertScalar(b)
 	return s.inner.Equals(&bScalar.inner)
@@ -172,6 +228,8 @@ func newPoint() *Point {
 }
 
 // Add sets p to a + b and returns p.
+// Add uses dcrd's AddNonConst which is not guaranteed constant-time for
+// Jacobian point additions.
 func (p *Point) Add(a, b group.Point) group.Point {
 	aPoint := assertPoint(a)
 	bPoint := assertPoint(b)
@@ -219,13 +277,18 @@ func (p *Point) Set(a group.Point) group.Point {
 // Bytes returns the compressed point encoding (33 bytes: prefix || x).
 // The prefix is 0x02 for even y, 0x03 for odd y.
 // Returns 33 zero bytes for the identity point.
+//
+// This method does NOT mutate the receiver. A clone is used for the
+// affine conversion to avoid side effects on the internal Jacobian state.
 func (p *Point) Bytes() []byte {
 	if p.IsIdentity() {
 		return make([]byte, 33)
 	}
-	// Convert to affine and get public key bytes
-	p.inner.ToAffine()
-	pk := secp256k1.NewPublicKey(&p.inner.X, &p.inner.Y)
+	// Clone before converting to affine to avoid mutating the receiver.
+	var clone secp256k1.JacobianPoint
+	clone.Set(&p.inner)
+	clone.ToAffine()
+	pk := secp256k1.NewPublicKey(&clone.X, &clone.Y)
 	return pk.SerializeCompressed()
 }
 
@@ -259,12 +322,17 @@ func (p *Point) SetBytes(data []byte) (group.Point, error) {
 // UncompressedBytes returns the 65-byte uncompressed point encoding.
 // Format: 0x04 || x (32 bytes) || y (32 bytes).
 // Returns 65 zero bytes for the identity point.
+//
+// This method does NOT mutate the receiver. A clone is used for the
+// affine conversion to avoid side effects on the internal Jacobian state.
 func (p *Point) UncompressedBytes() []byte {
 	if p.IsIdentity() {
 		return make([]byte, 65)
 	}
-	p.inner.ToAffine()
-	pk := secp256k1.NewPublicKey(&p.inner.X, &p.inner.Y)
+	var clone secp256k1.JacobianPoint
+	clone.Set(&p.inner)
+	clone.ToAffine()
+	pk := secp256k1.NewPublicKey(&clone.X, &clone.Y)
 	return pk.SerializeUncompressed()
 }
 
@@ -305,6 +373,26 @@ func (p *Point) Zero() {
 	p.inner.Z.Zero()
 }
 
+// secp256k1Generator is the cached base point, parsed once at init.
+var secp256k1Generator secp256k1.JacobianPoint
+
+func init() {
+	// secp256k1 generator point (compressed)
+	// 02 79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
+	genBytes := []byte{
+		0x02,
+		0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC,
+		0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B, 0x07,
+		0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9,
+		0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17, 0x98,
+	}
+	pk, err := secp256k1.ParsePubKey(genBytes)
+	if err != nil {
+		panic("secp256k1: invalid generator constant: " + err.Error())
+	}
+	pk.AsJacobian(&secp256k1Generator)
+}
+
 // Secp256k1 implements [group.Group] for the secp256k1 curve.
 //
 // Secp256k1 is a zero-sized type that provides access to secp256k1 curve
@@ -327,20 +415,11 @@ func (g *Secp256k1) NewPoint() group.Point {
 }
 
 // Generator returns the standard base point G for the secp256k1 curve.
+// Returns a fresh copy of the cached generator; callers may mutate it freely.
 func (g *Secp256k1) Generator() group.Point {
-	// secp256k1 generator point (compressed)
-	// 02 79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798
-	genBytes := []byte{
-		0x02,
-		0x79, 0xBE, 0x66, 0x7E, 0xF9, 0xDC, 0xBB, 0xAC,
-		0x55, 0xA0, 0x62, 0x95, 0xCE, 0x87, 0x0B, 0x07,
-		0x02, 0x9B, 0xFC, 0xDB, 0x2D, 0xCE, 0x28, 0xD9,
-		0x59, 0xF2, 0x81, 0x5B, 0x16, 0xF8, 0x17, 0x98,
-	}
-	pk, _ := secp256k1.ParsePubKey(genBytes)
-	var p Point
-	pk.AsJacobian(&p.inner)
-	return &p
+	p := &Point{}
+	p.inner.Set(&secp256k1Generator)
+	return p
 }
 
 // RandomScalar generates a cryptographically random scalar using the
@@ -371,6 +450,8 @@ func (g *Secp256k1) RandomScalar(r io.Reader) (group.Scalar, error) {
 func (g *Secp256k1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	hashWith := func(counter byte) []byte {
 		h := sha256.New()
+		// Domain separator: prevent cross-curve hash collisions.
+		h.Write([]byte("secp256k1"))
 		for _, d := range data {
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
@@ -387,6 +468,14 @@ func (g *Secp256k1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 
 	// Interpret as big-endian integer and reduce mod order
 	n := new(big.Int).SetBytes(expanded)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+		n.SetInt64(0)
+	}()
 	order := new(big.Int).SetBytes(g.Order())
 	n.Mod(n, order)
 
@@ -399,6 +488,7 @@ func (g *Secp256k1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 }
 
 // Order returns the order of the secp256k1 curve as a big-endian byte slice.
+// Returns a fresh copy of the group order.
 // This is the order n = FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141
 func (g *Secp256k1) Order() []byte {
 	// secp256k1 curve order

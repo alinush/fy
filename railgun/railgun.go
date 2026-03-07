@@ -31,6 +31,8 @@ import (
 	"errors"
 	"io"
 	"math/big"
+	"runtime"
+	"sync"
 
 	"github.com/f3rmion/fy/bjj"
 	"github.com/f3rmion/fy/frost"
@@ -57,6 +59,11 @@ func (s *Signature) Components() (*big.Int, *big.Int, *big.Int) {
 }
 
 // Bytes returns the signature as a 96-byte slice: RX (32) || RY (32) || S (32).
+//
+// Truncation cannot occur for valid Baby JubJub field elements because the BJJ
+// prime (< 2^254) guarantees that RX, RY, and S each fit within 32 bytes.
+// copyPadded left-pads shorter encodings and truncates longer ones, but the
+// latter case is unreachable for correctly constructed Signature values.
 func (s *Signature) Bytes() []byte {
 	result := make([]byte, 96)
 	copyPadded(result[0:32], s.RX.Bytes())
@@ -310,11 +317,13 @@ func (tw *ThresholdWallet) runDKG(f *frost.FROST, random io.Reader) ([]*frost.Ke
 
 // SigningSession manages a threshold signing operation.
 type SigningSession struct {
+	mu          sync.Mutex
 	tw          *ThresholdWallet
 	message     []byte
 	signers     []*Share
 	nonces      []*frost.SigningNonce
 	commitments []*frost.SigningCommitment
+	consumed    bool
 }
 
 // NewSigningSession creates a new signing session for the given message.
@@ -324,18 +333,29 @@ func (tw *ThresholdWallet) NewSigningSession(signers []*Share, message []byte) (
 		return nil, errors.New("insufficient signers for threshold")
 	}
 
+	// Copy message to prevent external modification
+	msgCopy := make([]byte, len(message))
+	copy(msgCopy, message)
+
+	// Copy signers slice to prevent external modification
+	signersCopy := make([]*Share, len(signers))
+	copy(signersCopy, signers)
+
 	return &SigningSession{
 		tw:          tw,
-		message:     message,
-		signers:     signers,
+		message:     msgCopy,
+		signers:     signersCopy,
 		nonces:      make([]*frost.SigningNonce, len(signers)),
 		commitments: make([]*frost.SigningCommitment, len(signers)),
 	}, nil
 }
 
 // Round1 performs the first round of signing for all participants.
-// Returns the commitments to be broadcast.
+// Returns a copy of the commitments to be broadcast.
 func (ss *SigningSession) Round1(random io.Reader) ([]*frost.SigningCommitment, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
 	if random == nil {
 		random = rand.Reader
 	}
@@ -349,11 +369,40 @@ func (ss *SigningSession) Round1(random io.Reader) ([]*frost.SigningCommitment, 
 		ss.commitments[i] = commitment
 	}
 
-	return ss.commitments, nil
+	// Return a copy to prevent callers from mutating internal state
+	result := make([]*frost.SigningCommitment, len(ss.commitments))
+	copy(result, ss.commitments)
+	return result, nil
 }
 
 // Round2 performs the second round and produces the final signature.
+// This method consumes the session; calling it again returns an error.
 func (ss *SigningSession) Round2() (*Signature, error) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+
+	if ss.consumed {
+		return nil, errors.New("signing session already consumed")
+	}
+	ss.consumed = true
+
+	// Zero nonces after use (defense-in-depth).
+	defer func() {
+		for _, n := range ss.nonces {
+			if n != nil {
+				if n.D != nil {
+					n.D.Zero()
+					runtime.KeepAlive(n.D)
+				}
+				if n.E != nil {
+					n.E.Zero()
+					runtime.KeepAlive(n.E)
+				}
+			}
+		}
+		ss.nonces = nil
+	}()
+
 	// Collect partial signatures from all signers
 	sigShares := make([]*frost.SignatureShare, len(ss.signers))
 
@@ -365,7 +414,11 @@ func (ss *SigningSession) Round2() (*Signature, error) {
 		sigShares[i] = share
 	}
 
-	// Aggregate into final signature
+	// Aggregate into final signature.
+	// Per-share verification is not performed here; the FROST Aggregate function
+	// performs a final signature verification against the group key. Individual
+	// share verification (via FROST.VerifySignatureShare) can be done at the
+	// caller level before aggregation if Byzantine fault attribution is needed.
 	frostSig, err := ss.tw.spendingFROST.Aggregate(ss.message, ss.commitments, sigShares)
 	if err != nil {
 		return nil, err
@@ -446,8 +499,10 @@ func (s *ShieldSignature) ToEthereumSignature() (r, sVal []byte) {
 		return nil, nil
 	}
 	uncompressed := p.UncompressedBytes()
-	// r = R.X (bytes 1-32 of uncompressed, skipping 0x04 prefix)
-	r = uncompressed[1:33]
+	// r = R.X (bytes 1-32 of uncompressed, skipping 0x04 prefix).
+	// Copy to avoid aliasing the underlying buffer.
+	r = make([]byte, 32)
+	copy(r, uncompressed[1:33])
 	// s = Z
 	sVal = s.Z.Bytes()
 	return r, sVal
@@ -455,10 +510,17 @@ func (s *ShieldSignature) ToEthereumSignature() (r, sVal []byte) {
 
 // ShieldSign performs threshold signing for shield operations using secp256k1.
 // This produces a Schnorr signature that can be converted to Ethereum format.
+//
+// ShieldSign uses crypto/rand.Reader for nonce generation. For deterministic
+// testing, mock rand.Reader at the package level.
 func (tw *ThresholdWallet) ShieldSign(signers []*Share, message []byte) (*ShieldSignature, error) {
 	if len(signers) < tw.threshold {
 		return nil, errors.New("insufficient signers for threshold")
 	}
+
+	// Copy message to prevent external modification
+	msgCopy := make([]byte, len(message))
+	copy(msgCopy, message)
 
 	// Round 1: Generate nonces and commitments
 	nonces := make([]*frost.SigningNonce, len(signers))
@@ -472,10 +534,26 @@ func (tw *ThresholdWallet) ShieldSign(signers []*Share, message []byte) (*Shield
 		commitments[i] = c
 	}
 
+	// Zero nonces after use (defense-in-depth).
+	defer func() {
+		for _, n := range nonces {
+			if n != nil {
+				if n.D != nil {
+					n.D.Zero()
+					runtime.KeepAlive(n.D)
+				}
+				if n.E != nil {
+					n.E.Zero()
+					runtime.KeepAlive(n.E)
+				}
+			}
+		}
+	}()
+
 	// Round 2: Generate signature shares
 	sigShares := make([]*frost.SignatureShare, len(signers))
 	for i, signer := range signers {
-		share, err := tw.shieldFROST.SignRound2(signer.ShieldKeyShare, nonces[i], message, commitments)
+		share, err := tw.shieldFROST.SignRound2(signer.ShieldKeyShare, nonces[i], msgCopy, commitments)
 		if err != nil {
 			return nil, err
 		}
@@ -483,7 +561,7 @@ func (tw *ThresholdWallet) ShieldSign(signers []*Share, message []byte) (*Shield
 	}
 
 	// Aggregate into final signature
-	frostSig, err := tw.shieldFROST.Aggregate(message, commitments, sigShares)
+	frostSig, err := tw.shieldFROST.Aggregate(msgCopy, commitments, sigShares)
 	if err != nil {
 		return nil, err
 	}
@@ -511,6 +589,9 @@ func (tw *ThresholdWallet) VerifyShield(groupKey group.Point, message []byte, si
 // This allows all threshold participants to independently derive the same
 // viewing key without interaction, enabling nullifier computation and
 // note decryption.
+//
+// The caller is responsible for zeroing the returned viewing key bytes when
+// no longer needed.
 func DeriveViewingKey(groupKey group.Point) ([]byte, error) {
 	var uncompressed []byte
 	switch p := groupKey.(type) {
@@ -534,10 +615,22 @@ func DeriveViewingKey(groupKey group.Point) ([]byte, error) {
 		return nil, err
 	}
 
+	// Zero intermediate key material derived from the group key.
+	defer func() {
+		zeroBigInt(x)
+		zeroBigInt(y)
+		zeroBigInt(hash)
+	}()
+
 	// Return as 32-byte key
 	result := make([]byte, 32)
 	hashBytes := hash.Bytes()
 	copy(result[32-len(hashBytes):], hashBytes)
+
+	// Zero hashBytes (separate slice from hash's internal representation)
+	for i := range hashBytes {
+		hashBytes[i] = 0
+	}
 
 	return result, nil
 }
@@ -568,6 +661,14 @@ func DeriveMasterPublicKey(spendingPubKey group.Point, viewingKey []byte) (*big.
 		return nil, err
 	}
 
+	// Zero intermediate key material.
+	defer func() {
+		zeroBigInt(x)
+		zeroBigInt(y)
+		zeroBigInt(vk)
+		zeroBigInt(nullifyingKey)
+	}()
+
 	// Compute master public key = poseidon(x, y, nullifyingKey)
 	masterPubKey, err := poseidon.Hash([]*big.Int{x, y, nullifyingKey})
 	if err != nil {
@@ -591,6 +692,12 @@ func ComputeNullifier(viewingKey []byte, leafIndex uint64) (*big.Int, error) {
 		return nil, err
 	}
 
+	// Zero intermediate key material.
+	defer func() {
+		zeroBigInt(vk)
+		zeroBigInt(nullifyingKey)
+	}()
+
 	// Compute nullifier = poseidon(nullifyingKey, leafIndex)
 	leafIdx := new(big.Int).SetUint64(leafIndex)
 	nullifier, err := poseidon.Hash([]*big.Int{nullifyingKey, leafIdx})
@@ -599,4 +706,16 @@ func ComputeNullifier(viewingKey []byte, leafIndex uint64) (*big.Int, error) {
 	}
 
 	return nullifier, nil
+}
+
+// zeroBigInt securely erases the words of a big.Int to prevent secret residue in memory.
+func zeroBigInt(n *big.Int) {
+	if n == nil {
+		return
+	}
+	words := n.Bits()
+	for i := range words {
+		words[i] = 0
+	}
+	n.SetInt64(0)
 }

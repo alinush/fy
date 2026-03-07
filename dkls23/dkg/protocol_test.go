@@ -31,7 +31,7 @@ func TestDKG2of2(t *testing.T) {
 		t.Skip("skipping expensive OT-based test in short mode")
 	}
 	params := Parameters{Threshold: 2, ShareCount: 2}
-	sessionID := []byte("test-dkg-2of2")
+	sessionID := []byte("test-dkg-2of2-pad")
 
 	// Create session data for each party
 	data1 := &SessionData{Parameters: params, PartyIndex: 1, SessionID: sessionID}
@@ -131,7 +131,7 @@ func TestDKG2of3(t *testing.T) {
 		t.Skip("skipping expensive OT-based test in short mode")
 	}
 	params := Parameters{Threshold: 2, ShareCount: 3}
-	sessionID := []byte("test-dkg-2of3")
+	sessionID := []byte("test-dkg-2of3-pad")
 
 	// Create session data for each party
 	data := make([]*SessionData, 3)
@@ -247,7 +247,7 @@ func TestDKG2of3(t *testing.T) {
 func TestFixedPolynomials(t *testing.T) {
 	// Test with fixed polynomial values to verify correctness
 	params := Parameters{Threshold: 2, ShareCount: 2}
-	sessionID := []byte("test-fixed-poly")
+	sessionID := []byte("test-fixed-poly-pad")
 
 	// Define fragments directly:
 	// p1(1) = 1, p1(2) = 3

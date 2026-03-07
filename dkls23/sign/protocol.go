@@ -2,6 +2,7 @@ package sign
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 	"slices"
 
@@ -21,12 +22,35 @@ func (p *Party) Phase1(data *SignData) (
 		return nil, nil, nil, errors.New("wrong number of counterparties")
 	}
 
+	// Check for duplicate counterparties
+	cpSet := make(map[uint8]bool, len(data.Counterparties))
+	for _, cp := range data.Counterparties {
+		if cpSet[cp] {
+			return nil, nil, nil, errors.New("duplicate counterparty")
+		}
+		cpSet[cp] = true
+	}
+
 	// Step 5: Sample secret data
-	instanceKey, err := dkls23.RandomScalar()
+	var instanceKey, inversionMask group.Scalar
+	success := false
+	defer func() {
+		if !success {
+			if instanceKey != nil {
+				instanceKey.Zero()
+			}
+			if inversionMask != nil {
+				inversionMask.Zero()
+			}
+		}
+	}()
+
+	var err error
+	instanceKey, err = dkls23.RandomScalar()
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	inversionMask, err := dkls23.RandomScalar()
+	inversionMask, err = dkls23.RandomScalar()
 	if err != nil {
 		return nil, nil, nil, err
 	}
@@ -76,6 +100,7 @@ func (p *Party) Phase1(data *SignData) (
 		Zeta:          zeta,
 	}
 
+	success = true
 	return uniqueKeep, keep, transmit, nil
 }
 
@@ -91,11 +116,23 @@ func (p *Party) Phase2(
 	[]*Phase2ToPhase3Transmit,
 	error,
 ) {
+	// D-09: Zero kept Phase1ToPhase2Keep data on error to prevent secret leakage.
+	success := false
+	defer func() {
+		if !success {
+			for _, k := range kept {
+				k.Zero()
+			}
+		}
+	}()
+
 	// Compute Lagrange coefficient
 	lagrange, err := computeLagrangeCoeff(p.Index, data.Counterparties)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	// Zero the Lagrange coefficient after use (it encodes key share structure).
+	defer lagrange.Zero()
 
 	// Compute key share and public share
 	// keyShare = polyPoint * lagrange + zeta
@@ -109,6 +146,18 @@ func (p *Party) Phase2(
 	transmit := make([]*Phase2ToPhase3Transmit, 0, len(received))
 
 	for _, msg := range received {
+		// Validate sender is an expected counterparty.
+		validSender := false
+		for _, cp := range data.Counterparties {
+			if cp == msg.Sender {
+				validSender = true
+				break
+			}
+		}
+		if !validSender {
+			return nil, nil, nil, fmt.Errorf("unexpected sender %d in Phase2", msg.Sender)
+		}
+
 		counterparty := msg.Sender
 		currentKept := kept[counterparty]
 
@@ -151,14 +200,19 @@ func (p *Party) Phase2(
 		})
 	}
 
+	// Deep-copy scalars that carry forward so zeroing the original
+	// UniqueKeep1to2 does not corrupt the values in UniqueKeep2to3.
 	uniqueKeep := &UniqueKeep2to3{
-		InstanceKey:   uniqueKept.InstanceKey,
+		InstanceKey:   dkls23.NewScalar().Set(uniqueKept.InstanceKey),
 		InstancePoint: uniqueKept.InstancePoint,
-		InversionMask: uniqueKept.InversionMask,
+		InversionMask: dkls23.NewScalar().Set(uniqueKept.InversionMask),
 		KeyShare:      keyShare,
 		PublicShare:   publicShare,
 	}
+	// Zero consumed UniqueKeep1to2 (zeros InstanceKey, InversionMask, Zeta originals).
+	uniqueKept.Zero()
 
+	success = true
 	return uniqueKeep, keep, transmit, nil
 }
 
@@ -169,6 +223,20 @@ func (p *Party) Phase3(
 	kept map[uint8]*Phase2ToPhase3Keep,
 	received []*Phase2ToPhase3Transmit,
 ) ([]byte, *Phase3Broadcast, error) {
+	// Zero secret material from the consumed UniqueKeep2to3 on exit.
+	defer uniqueKept.Zero()
+	// Zero secret material from the consumed Phase2ToPhase3Keep on exit.
+	defer func() {
+		for _, k := range kept {
+			k.Zero()
+		}
+	}()
+
+	// D-12: Validate message count matches expected counterparties.
+	if len(received) != len(data.Counterparties) {
+		return nil, nil, fmt.Errorf("expected %d Phase2 messages, got %d", len(data.Counterparties), len(received))
+	}
+
 	// Initialize sums
 	expectedPublicKey := uniqueKept.PublicShare
 	totalInstancePoint := uniqueKept.InstancePoint
@@ -179,6 +247,18 @@ func (p *Party) Phase3(
 	secondSumV := dkls23.NewScalar()
 
 	for _, msg := range received {
+		// D-06: Validate sender is an expected counterparty.
+		validSender := false
+		for _, cp := range data.Counterparties {
+			if cp == msg.Sender {
+				validSender = true
+				break
+			}
+		}
+		if !validSender {
+			return nil, nil, fmt.Errorf("unexpected sender %d in Phase3", msg.Sender)
+		}
+
 		counterparty := msg.Sender
 		currentKept := kept[counterparty]
 
@@ -252,12 +332,23 @@ func (p *Party) Phase3(
 	// xCoord (32 bytes from compressed point) and msgHash (32 bytes from SHA-256)
 	// are always valid inputs. Values >= group order are reduced mod n, matching
 	// standard ECDSA behavior (see SEC 1 v2, Section 4.1.3).
-	xScalar, _ := dkls23.ScalarFromBytes(xCoord)
-	msgScalar, _ := dkls23.ScalarFromBytes(data.MessageHash[:])
+	xScalar, err := dkls23.ScalarFromBytes(xCoord)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid x-coordinate scalar: %w", err)
+	}
+	msgScalar, err := dkls23.ScalarFromBytes(data.MessageHash[:])
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid message hash scalar: %w", err)
+	}
 	w := dkls23.ScalarAdd(
 		dkls23.ScalarMul(msgScalar, uniqueKept.InversionMask),
 		dkls23.ScalarMul(v, xScalar),
 	)
+
+	// Zero intermediate scalar v -- it encodes keyShare * firstSumUV + secondSumV
+	// and is no longer needed after computing w. Scalars u and w are moved
+	// into the broadcast and must remain live for Phase4.
+	v.Zero()
 
 	broadcast := &Phase3Broadcast{U: u, W: w}
 
@@ -295,6 +386,15 @@ func (p *Party) Phase4(
 		return nil, err
 	}
 	s := dkls23.ScalarMul(numerator, denominatorInv)
+
+	// Zero secret intermediates: numerator (sum of w), denominator (sum of u),
+	// and denominatorInv (u^-1) all carry signing-session secret material.
+	numerator.Zero()
+	denominator.Zero()
+	denominatorInv.Zero()
+
+	// Zero s after extracting its bytes for the signature.
+	defer s.Zero()
 
 	// Compute recovery ID from y-parity BEFORE normalization
 	// Recovery ID: 0 if y is even (parity byte 0x02), 1 if y is odd (parity byte 0x03)
@@ -400,8 +500,14 @@ func verifyECDSA(msgHash dkls23.HashOutput, pk group.Point, rBytes []byte, s gro
 	// Compute u1 = msgHash * s^-1, u2 = r * s^-1
 	// ScalarFromBytes performs modular reduction via secp256k1 SetBytes.
 	// Hash outputs and x-coordinates (32 bytes each) are always valid inputs.
-	msgScalar, _ := dkls23.ScalarFromBytes(msgHash[:])
-	rScalar, _ := dkls23.ScalarFromBytes(rBytes)
+	msgScalar, err := dkls23.ScalarFromBytes(msgHash[:])
+	if err != nil {
+		return false
+	}
+	rScalar, err := dkls23.ScalarFromBytes(rBytes)
+	if err != nil {
+		return false
+	}
 
 	u1 := dkls23.ScalarMul(msgScalar, sInv)
 	u2 := dkls23.ScalarMul(rScalar, sInv)

@@ -11,6 +11,9 @@ import (
 // DKLS23SigningSession manages a single DKLS23 signing operation.
 // Each session produces one signature for one message.
 //
+// All phase methods are safe for concurrent use; a mutex serializes access
+// to mutable state (phase counter, intermediate kept values, compressedR).
+//
 // Create sessions using [NewDKLS23SigningSession].
 type DKLS23SigningSession struct {
 	mu sync.Mutex
@@ -65,6 +68,9 @@ func NewDKLS23SigningSession(
 	if party == nil {
 		return nil, errors.New("party cannot be nil")
 	}
+	if len(signID) == 0 {
+		return nil, errors.New("signID cannot be empty")
+	}
 
 	expectedCounterparties := int(party.Threshold - 1)
 	if len(counterparties) != expectedCounterparties {
@@ -79,6 +85,15 @@ func NewDKLS23SigningSession(
 		if cp == party.Index {
 			return nil, errors.New("counterparties cannot include self")
 		}
+	}
+
+	// Check for duplicate counterparties
+	cpSet := make(map[uint8]bool, len(counterparties))
+	for _, cp := range counterparties {
+		if cpSet[cp] {
+			return nil, errors.New("duplicate counterparty index")
+		}
+		cpSet[cp] = true
 	}
 
 	// Copy inputs to prevent external modification
@@ -161,7 +176,11 @@ func (s *DKLS23SigningSession) Phase2(received map[uint8]*sign.Phase1ToPhase2Tra
 	s.keep2 = keep
 	s.phase = 2
 
-	// Clear phase 1 state
+	// Clear references to phase 1 state (no longer needed).
+	// Note: scalar values in these structs are shared by pointer with
+	// uniqueKeep2/keep2, so we must NOT zero them here. They will be
+	// zeroed when Phase3 consumes and defers cleanup of Phase2ToPhase3Keep
+	// and UniqueKeep2to3 (see sign/protocol.go Phase3).
 	s.uniqueKeep1 = nil
 	s.keep1 = nil
 
@@ -207,7 +226,10 @@ func (s *DKLS23SigningSession) Phase3(received map[uint8]*sign.Phase2ToPhase3Tra
 	s.compressedR = compressedR
 	s.phase = 3
 
-	// Clear phase 2 state
+	// Clear references to phase 2 state (no longer needed).
+	// Secret scalars in uniqueKeep2 and keep2 were already zeroed by
+	// sign.Party.Phase3's deferred cleanup (UniqueKeep2to3.Zero and
+	// Phase2ToPhase3Keep.Zero).
 	s.uniqueKeep2 = nil
 	s.keep2 = nil
 
@@ -236,8 +258,12 @@ func (s *DKLS23SigningSession) Phase4(received []*sign.Phase3Broadcast, normaliz
 
 	s.phase = 4
 
-	// Clear remaining state
+	// Clear remaining state to release references to secret material.
+	// The Party is externally owned and not zeroed here, but the session's
+	// reference is released so the session itself does not pin it.
 	s.compressedR = nil
+	s.signData = nil
+	s.party = nil
 
 	return sig, nil
 }
@@ -352,7 +378,9 @@ func DKLS23QuickSign(
 		broadcasts[i] = output.Broadcast
 	}
 
-	// Phase 4 (any party can finalize)
+	// Phase4 is called only on sessions[0] since any party can finalize.
+	// Other sessions' compressedR values (public nonce points) are not zeroed
+	// as they are not secret material.
 	return sessions[0].Phase4(broadcasts, normalize)
 }
 

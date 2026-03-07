@@ -29,12 +29,15 @@ func TestShareAndReconstruct(t *testing.T) {
 	n := 5
 
 	poly, _ := NewRandomPolynomial(g, secret, threshold-1, rand.Reader)
-	shares := GenerateShares(g, poly, n)
+	shares, err := GenerateShares(g, poly, n)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Reconstruct using Lagrange interpolation with threshold shares
 	// Pick shares 1, 2, 3
 	ids := []int{1, 2, 3}
-	reconstructed := lagrangeInterpolateAtZero(g, ids, shares)
+	reconstructed := lagrangeInterpolateAtZero(t, g, ids, shares)
 
 	if !reconstructed.Equal(secret) {
 		t.Error("Lagrange reconstruction should recover secret")
@@ -42,7 +45,8 @@ func TestShareAndReconstruct(t *testing.T) {
 }
 
 // lagrangeInterpolateAtZero reconstructs f(0) from shares using Lagrange interpolation.
-func lagrangeInterpolateAtZero(g group.Group, ids []int, shares map[int]group.Scalar) group.Scalar {
+func lagrangeInterpolateAtZero(t *testing.T, g group.Group, ids []int, shares map[int]group.Scalar) group.Scalar {
+	t.Helper()
 	result := g.NewScalar()
 	// Create one scalar
 	buf := make([]byte, 32)
@@ -50,20 +54,26 @@ func lagrangeInterpolateAtZero(g group.Group, ids []int, shares map[int]group.Sc
 	one, _ := g.NewScalar().SetBytes(buf)
 
 	for _, i := range ids {
-		xi := scalarFromInt(g, i)
+		xi, err := scalarFromInt(g, i)
+		if err != nil {
+			t.Fatal(err)
+		}
 		li := g.NewScalar().Set(one)
 
 		for _, j := range ids {
 			if i == j {
 				continue
 			}
-			xj := scalarFromInt(g, j)
+			xj, err := scalarFromInt(g, j)
+			if err != nil {
+				t.Fatal(err)
+			}
 			// li *= xj / (xj - xi)
 			// Since we evaluate at 0: li *= -xj / (xi - xj) = xj / (xj - xi)
 			diff := g.NewScalar().Sub(xj, xi)
 			diffInv, err := g.NewScalar().Invert(diff)
 			if err != nil {
-				panic("zero denominator in Lagrange interpolation")
+				t.Fatal("zero denominator in Lagrange interpolation")
 			}
 			term := g.NewScalar().Mul(xj, diffInv)
 			li = g.NewScalar().Mul(li, term)
@@ -83,11 +93,14 @@ func TestInsufficientSharesFail(t *testing.T) {
 	n := 5
 
 	poly, _ := NewRandomPolynomial(g, secret, threshold-1, rand.Reader)
-	shares := GenerateShares(g, poly, n)
+	shares, err := GenerateShares(g, poly, n)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Try with only 2 shares (less than threshold of 3)
 	ids := []int{1, 2}
-	reconstructed := lagrangeInterpolateAtZero(g, ids, shares)
+	reconstructed := lagrangeInterpolateAtZero(t, g, ids, shares)
 
 	// Should NOT equal secret (with overwhelming probability)
 	if reconstructed.Equal(secret) {

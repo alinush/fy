@@ -20,6 +20,9 @@ var (
 
 // FROST holds the cryptographic group and threshold parameters for the
 // FROST signature scheme. Create instances using [New] or [NewWithHasher].
+//
+// A FROST value is safe for concurrent use by multiple goroutines.
+// All methods are stateless with respect to the FROST struct.
 type FROST struct {
 	group     group.Group
 	hasher    Hasher
@@ -111,9 +114,24 @@ func NewWithHasher(g group.Group, threshold, total int, hasher Hasher) (*FROST, 
 	}, nil
 }
 
+// Threshold returns the minimum number of signers required (t).
+func (f *FROST) Threshold() int {
+	return f.threshold
+}
+
+// Total returns the total number of participants (n).
+func (f *FROST) Total() int {
+	return f.total
+}
+
 // scalarFromInt creates a scalar from a non-negative integer value.
 // Supports values up to 2^32-1 (encoded as big-endian in a 32-byte buffer).
-// Panics if n is negative (programmer error).
+//
+// scalarFromInt panics on invalid input (negative values). This is intentional
+// for internal invariant assertions on controlled inputs. A SetBytes failure
+// indicates a bug in the group implementation, not a recoverable runtime
+// condition, since values in [0, 2^32-1] are always well within any supported
+// group's scalar field order (>= 2^251).
 func (f *FROST) scalarFromInt(n int) group.Scalar {
 	if n < 0 {
 		panic("scalarFromInt: negative value")
@@ -121,7 +139,6 @@ func (f *FROST) scalarFromInt(n int) group.Scalar {
 	s := f.group.NewScalar()
 	buf := make([]byte, 32)
 	binary.BigEndian.PutUint32(buf[28:], uint32(n))
-	// Values in [0, 2^32-1] are always within group order; panic indicates a bug.
 	if _, err := s.SetBytes(buf); err != nil {
 		panic("scalarFromInt: SetBytes failed for small integer: " + err.Error())
 	}
@@ -131,6 +148,12 @@ func (f *FROST) scalarFromInt(n int) group.Scalar {
 // lagrangeCoefficientFromIDs computes the Lagrange basis polynomial
 // evaluated at zero for participant myID within the set allIDs.
 // Returns lambda_i = product(x_j) / product(x_j - x_i) for j != i.
+//
+// TIMING SIDE-CHANNEL NOTE: For BJJ-based protocols, the underlying Mul and
+// Invert operations use math/big which is NOT constant-time. This means
+// timing variations may leak information about the scalar operands.
+// secp256k1 uses dcrd's constant-time field arithmetic, and BN254G1 uses
+// gnark-crypto's Montgomery-form operations, so those curves are not affected.
 func (f *FROST) lagrangeCoefficientFromIDs(myID group.Scalar, allIDs []group.Scalar) (group.Scalar, error) {
 	num := f.scalarFromInt(1)
 	den := f.scalarFromInt(1)
@@ -150,13 +173,23 @@ func (f *FROST) lagrangeCoefficientFromIDs(myID group.Scalar, allIDs []group.Sca
 	if err != nil {
 		return nil, errors.New("lagrange coefficient: zero denominator (duplicate IDs?)")
 	}
-	return f.group.NewScalar().Mul(num, denInv), nil
+	result := f.group.NewScalar().Mul(num, denInv)
+
+	// Zero intermediate values that encode key share structure.
+	num.Zero()
+	den.Zero()
+	denInv.Zero()
+
+	return result, nil
 }
 
 // evalPolynomial evaluates a polynomial at point x using Horner's method.
 // The polynomial is represented by its coefficients [a0, a1, ..., an]
 // where p(x) = a0 + a1*x + a2*x^2 + ... + an*x^n.
 func (f *FROST) evalPolynomial(coeffs []group.Scalar, x group.Scalar) group.Scalar {
+	if len(coeffs) == 0 {
+		return f.group.NewScalar()
+	}
 	result := f.group.NewScalar().Set(coeffs[len(coeffs)-1])
 	for i := len(coeffs) - 2; i >= 0; i-- {
 		result = f.group.NewScalar().Mul(result, x)

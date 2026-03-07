@@ -2,9 +2,11 @@ package golden
 
 import (
 	"bytes"
+	"errors"
+	"flag"
 	"fmt"
 	"math/big"
-	"os"
+	"runtime"
 	"sync"
 
 	"github.com/consensys/gnark-crypto/ecc"
@@ -15,14 +17,14 @@ import (
 	"github.com/consensys/gnark/frontend/cs/scs"
 	"github.com/consensys/gnark/std/algebra/emulated/sw_emulated"
 	"github.com/consensys/gnark/std/math/emulated"
-	"github.com/consensys/gnark/test/unsafekzg"
 
 	"github.com/f3rmion/fy/group"
 )
 
 // maxProofSize is the maximum allowed size for a serialized PLONK proof.
-// BN254 PLONK proofs are typically ~600 bytes; 4096 gives ample headroom.
-const maxProofSize = 4096
+// BN254 PLONK proofs are typically ~600 bytes; 2048 gives ample headroom
+// while limiting the attack surface for oversized proof parsing.
+const maxProofSize = 2048
 
 var (
 	evrfSetupOnce sync.Once
@@ -32,11 +34,16 @@ var (
 	evrfSetupErr  error
 )
 
+// testingSRSProvider, when non-nil, overrides the default ceremony SRS
+// for testing. This MUST only be set from _test.go init() functions.
+// Production code always uses LoadCeremonySRS (Aztec Ignition ceremony).
+var testingSRSProvider func(constraint.ConstraintSystem) (kzg.SRS, kzg.SRS, error)
+
 // initEVRFKeys compiles the eVRF circuit and generates PLONK keys.
 // Called once via sync.Once.
 //
-// By default, loads the Aztec Ignition ceremony SRS (downloaded and cached
-// on first use). Set FY_GOLDEN_UNSAFE_SRS=1 to use unsafekzg for testing.
+// Uses the Aztec Ignition ceremony SRS (downloaded and cached on first use).
+// Tests override via testingSRSProvider set in _test.go init().
 func initEVRFKeys() {
 	evrfSetupOnce.Do(func() {
 		// Compile the circuit.
@@ -53,13 +60,16 @@ func initEVRFKeys() {
 		var canonical, lagrange kzg.SRS
 		var err error
 
-		if os.Getenv("FY_GOLDEN_UNSAFE_SRS") == "1" {
-			// Test/POC path: unsafe SRS with known toxic waste.
-			fmt.Fprintln(os.Stderr, "golden: WARNING: FY_GOLDEN_UNSAFE_SRS=1 is set. "+
-				"Using INSECURE test SRS with known toxic waste. DO NOT USE IN PRODUCTION.")
-			canonical, lagrange, err = unsafekzg.NewSRS(evrfCCS)
+		if testingSRSProvider != nil {
+			// Safety: testingSRSProvider must only be set from _test.go init().
+			// Verify we are running inside a test binary by checking for the
+			// standard "test.v" flag that Go's testing framework registers.
+			if flag.Lookup("test.v") == nil {
+				panic("golden: testingSRSProvider set in non-test binary - this is a security violation")
+			}
+			canonical, lagrange, err = testingSRSProvider(evrfCCS)
 			if err != nil {
-				evrfSetupErr = fmt.Errorf("golden: generating unsafe SRS: %w", err)
+				evrfSetupErr = fmt.Errorf("golden: test SRS provider: %w", err)
 				return
 			}
 		} else {
@@ -202,6 +212,10 @@ func generateEVRFProofPLONK(
 	for i := range skBytes {
 		skBytes[i] = 0
 	}
+	// Prevent the compiler from optimizing away the zeroing by ensuring
+	// the variables are considered live until after the overwrite completes.
+	runtime.KeepAlive(skBigInt)
+	runtime.KeepAlive(skBytes)
 
 	if err != nil {
 		return nil, fmt.Errorf("golden: creating witness: %w", err)
@@ -234,6 +248,9 @@ func verifyEVRFProofPLONK(
 	proofBytes []byte,
 ) error {
 	// Check proof size before any processing.
+	if len(proofBytes) == 0 {
+		return errors.New("golden: empty proof bytes")
+	}
 	if len(proofBytes) > maxProofSize {
 		return ErrProofTooLarge
 	}

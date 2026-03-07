@@ -70,7 +70,10 @@ func TestVerifyIdentityTamperedProof(t *testing.T) {
 	proof, _ := ProveIdentity(g, sk, pk, sid, rand.Reader)
 
 	// Tamper with the response.
-	one := scalarFromInt(g, 1)
+	one, err := scalarFromInt(g, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
 	tamperedResponse := g.NewScalar().Add(proof.Response, one)
 
 	tamperedProof := &IdentityProof{

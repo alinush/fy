@@ -15,7 +15,7 @@ func TestDKLS23DKGAndSign(t *testing.T) {
 
 	threshold := uint8(2)
 	total := uint8(3)
-	sessionID := []byte("test-session-id")
+	sessionID := []byte("test-session-id!")
 
 	// Create participants
 	participants := make([]*DKLS23Participant, total)
@@ -256,7 +256,7 @@ func TestDKLS23QuickSign(t *testing.T) {
 
 	threshold := uint8(2)
 	total := uint8(3)
-	sessionID := []byte("quick-sign-test")
+	sessionID := []byte("quick-sign-test!")
 
 	// Run DKG
 	parties := runDKLS23DKG(t, threshold, total, sessionID)
@@ -276,7 +276,7 @@ func TestDKLS23QuickSign(t *testing.T) {
 }
 
 func TestDKLS23ParticipantValidation(t *testing.T) {
-	sessionID := []byte("test")
+	sessionID := []byte("test-session-val")
 
 	// Index too low
 	_, err := NewDKLS23Participant(2, 3, 0, sessionID)
@@ -318,7 +318,7 @@ func TestDKLS23SigningSessionValidation(t *testing.T) {
 
 	threshold := uint8(2)
 	total := uint8(3)
-	sessionID := []byte("validation-test")
+	sessionID := []byte("validation-test!")
 
 	parties := runDKLS23DKG(t, threshold, total, sessionID)
 
@@ -387,14 +387,16 @@ func TestDKLS23SetParty(t *testing.T) {
 
 	threshold := uint8(2)
 	total := uint8(3)
-	sessionID := []byte("set-party-test")
+	sessionID := []byte("set-party-test!!")
 
 	// Run DKG
 	parties := runDKLS23DKG(t, threshold, total, sessionID)
 
 	// Create new participant and set party (simulating restore)
 	restored, _ := NewDKLS23Participant(threshold, total, 1, sessionID)
-	restored.SetParty(parties[0])
+	if err := restored.SetParty(parties[0]); err != nil {
+		t.Fatalf("failed to set party: %v", err)
+	}
 
 	if restored.Party() == nil {
 		t.Error("party should not be nil after SetParty")

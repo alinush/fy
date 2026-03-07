@@ -31,6 +31,15 @@ type DkgConfig struct {
 	T int
 	// SessionID uniquely identifies this DKG session.
 	SessionID SessionID
+	// DerivedGroups lists additional groups for which Shamir shares should
+	// be derived from the same polynomial. Coefficients are reduced mod each
+	// group's scalar field order via SetBytes. For example, [bjj.BJJ, secp256k1.Secp256k1]
+	// would produce BJJ and secp256k1 key shares alongside the primary BN254 G1 output.
+	//
+	// The slice index is used as the key for parallel arrays throughout the protocol:
+	// Round0Msg.DerivedCurves[i], DkgDealing.DerivedPrivateShares[i], and
+	// DkgOutput.DerivedOutputs[i] all correspond to DerivedGroups[i].
+	DerivedGroups []group.Group
 }
 
 // Participant holds a node's identity and key material.
@@ -48,6 +57,21 @@ type Ciphertext struct {
 	EncryptedShare group.Scalar
 }
 
+// DerivedCurveData holds broadcast data for a single derived curve.
+// The pad for each ciphertext is the BN254 pad reduced mod the derived group order.
+type DerivedCurveData struct {
+	VSSCommitments []group.Point       // derived-group commitments to reduced coefficients
+	Ciphertexts    map[int]*Ciphertext // keyed by recipient NodeID
+}
+
+// DerivedOutput holds DKG output for a single derived curve.
+type DerivedOutput struct {
+	Group           group.Group
+	PublicKey       group.Point
+	PublicKeyShares map[int]group.Point
+	SecretShare     group.Scalar
+}
+
 // Round0Msg is the broadcast message from a dealer in the non-interactive DKG.
 // VSSCommitments[0] = omega * G_outer serves as the PK contribution for the group key.
 type Round0Msg struct {
@@ -58,12 +82,39 @@ type Round0Msg struct {
 	Ciphertexts    map[int]*Ciphertext // keyed by recipient NodeID
 	IdentityProof  *IdentityProof      // Schnorr proof of inner-curve PK ownership
 	EVRFProofs     map[int][]byte      // keyed by recipient NodeID, serialized PLONK proofs
+	// DerivedCurves holds per-derived-group VSS commitments and ciphertexts.
+	// Parallel to config.DerivedGroups; nil when no derived groups are configured.
+	DerivedCurves []*DerivedCurveData
 }
 
 // DkgDealing bundles a broadcast message with the dealer's own private share.
 type DkgDealing struct {
 	Message      *Round0Msg
 	PrivateShare group.Scalar // dealer's own Shamir share (Fr)
+	// DerivedPrivateShares holds the dealer's own shares for each derived group.
+	// Parallel to config.DerivedGroups; nil when no derived groups are configured.
+	DerivedPrivateShares []group.Scalar
+}
+
+// Zero zeroes local secret material in DkgDealing (PrivateShare,
+// DerivedPrivateShares, and RandomMsg). Broadcast data in Round0Msg
+// (ciphertext encrypted shares, VSS commitments) is not zeroed since
+// it is public on the wire. Callers should invoke this after Complete() returns.
+func (d *DkgDealing) Zero() {
+	if d.PrivateShare != nil {
+		d.PrivateShare.Zero()
+	}
+	for _, s := range d.DerivedPrivateShares {
+		if s != nil {
+			s.Zero()
+		}
+	}
+	// Zero the random nonce used in session data derivation.
+	if d.Message != nil {
+		for i := range d.Message.RandomMsg {
+			d.Message.RandomMsg[i] = 0
+		}
+	}
 }
 
 // DkgOutput is the result of a completed DKG for one participant.
@@ -74,6 +125,9 @@ type DkgOutput struct {
 	PublicKeyShares map[int]group.Point
 	// SecretShare is this participant's aggregated secret share (Fr).
 	SecretShare group.Scalar
+	// DerivedOutputs holds outputs for each derived group.
+	// Parallel to config.DerivedGroups; nil when no derived groups are configured.
+	DerivedOutputs []*DerivedOutput
 }
 
 // Sentinel errors for the GOLDEN DKG protocol.
@@ -104,12 +158,19 @@ var (
 	ErrNilIdentityProof        = errors.New("golden: nil identity proof in dealing")
 	ErrNilCiphertext           = errors.New("golden: nil ciphertext entry in dealing")
 	ErrNilSuite                = errors.New("golden: nil CurveSuite")
+	ErrDerivedCurveCountMismatch = errors.New("golden: derived curve count does not match config")
+	ErrDerivedCiphertextVerification = errors.New("golden: derived curve ciphertext verification failed")
 )
 
-// Zero zeroes the secret material in DkgOutput.
-// Callers should invoke this after converting to a FROST KeyShare.
+// Zero zeroes the secret material in DkgOutput, including all derived shares.
+// Callers should invoke this after converting to FROST KeyShares.
 func (o *DkgOutput) Zero() {
 	if o.SecretShare != nil {
 		o.SecretShare.Zero()
+	}
+	for _, d := range o.DerivedOutputs {
+		if d != nil && d.SecretShare != nil {
+			d.SecretShare.Zero()
+		}
 	}
 }

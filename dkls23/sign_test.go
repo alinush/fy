@@ -17,7 +17,7 @@ func TestSign2of2(t *testing.T) {
 
 	// First, run DKG to get parties
 	params := dkg.Parameters{Threshold: 2, ShareCount: 2}
-	sessionID := []byte("test-sign-2of2")
+	sessionID := []byte("test-sign-2of2-pad")
 
 	data1 := &dkg.SessionData{Parameters: params, PartyIndex: 1, SessionID: sessionID}
 	data2 := &dkg.SessionData{Parameters: params, PartyIndex: 2, SessionID: sessionID}
@@ -219,7 +219,7 @@ func TestSign2of3(t *testing.T) {
 
 	// === 2-of-3 DKG ===
 	params := dkg.Parameters{Threshold: 2, ShareCount: 3}
-	sessionID := []byte("test-sign-2of3")
+	sessionID := []byte("test-sign-2of3-pad")
 
 	data := make([]*dkg.SessionData, 3)
 	for i := range 3 {

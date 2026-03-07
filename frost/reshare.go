@@ -245,6 +245,9 @@ func (rom *ReshareOldMember) Zero() {
 		rom.coefficients[i].Zero()
 	}
 	rom.coefficients = nil
+	if rom.id != nil {
+		rom.id.Zero()
+	}
 }
 
 // Zero securely erases all secret material held by the reshare new member.

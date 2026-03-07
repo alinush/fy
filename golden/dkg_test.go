@@ -50,6 +50,9 @@ func scalarFromIntForTest(g group.Group, n int) group.Scalar {
 // createDealingNoProofs creates a DKG dealing without generating eVRF proofs.
 // This bypasses the PLONK circuit compilation while still exercising the
 // polynomial, VSS, share encryption, and identity proof logic.
+//
+// Note: Error-path secret zeroing is intentionally omitted here (test code
+// only). Production CreateDealing uses zeroSecrets() for comprehensive cleanup.
 func createDealingNoProofs(
 	suite CurveSuite,
 	config *DkgConfig,
@@ -77,7 +80,10 @@ func createDealingNoProofs(
 	}
 
 	// Generate shares for all participants in Fr.
-	shares := GenerateShares(outerGroup, poly, config.N)
+	shares, err := GenerateShares(outerGroup, poly, config.N)
+	if err != nil {
+		return nil, err
+	}
 	ownShare := shares[self.ID]
 
 	// Random 32-byte nonce.
@@ -102,10 +108,19 @@ func createDealingNoProofs(
 	sessionData := [][]byte{config.SessionID[:], randomMsg[:]}
 	ciphertexts := make(map[int]*Ciphertext, len(peers))
 
+	hasDerived := len(config.DerivedGroups) > 0
+	var padBytesCache map[int][]byte
+	if hasDerived {
+		padBytesCache = make(map[int][]byte, len(peers))
+	}
+
 	for _, peer := range peers {
 		padResult, err := DerivePad(suite, self.SK, peer.PK, sessionData, alpha)
 		if err != nil {
 			return nil, err
+		}
+		if hasDerived {
+			padBytesCache[peer.ID] = padResult.Pad.Bytes()
 		}
 		z := outerGroup.NewScalar().Add(padResult.Pad, shares[peer.ID])
 		ciphertexts[peer.ID] = &Ciphertext{
@@ -113,6 +128,67 @@ func createDealingNoProofs(
 			EncryptedShare: z,
 		}
 		padResult.Pad.Zero()
+	}
+
+	// Derived curve shares, VSS commitments, and ciphertexts.
+	var derivedCurves []*DerivedCurveData
+	var derivedPrivateShares []group.Scalar
+
+	if hasDerived {
+		derivedCurves = make([]*DerivedCurveData, len(config.DerivedGroups))
+		derivedPrivateShares = make([]group.Scalar, len(config.DerivedGroups))
+
+		for idx, dg := range config.DerivedGroups {
+			derivedCoeffs := make([]group.Scalar, len(poly.Coefficients))
+			for j, c := range poly.Coefficients {
+				dc := dg.NewScalar()
+				if _, err := dc.SetBytes(c.Bytes()); err != nil {
+					return nil, err
+				}
+				derivedCoeffs[j] = dc
+			}
+			derivedPoly := &Polynomial{Coefficients: derivedCoeffs}
+			derivedShares, err := GenerateShares(dg, derivedPoly, config.N)
+			if err != nil {
+				return nil, err
+			}
+			derivedPrivateShares[idx] = derivedShares[self.ID]
+
+			derivedVSS, err := VSSCommit(dg, derivedPoly)
+			if err != nil {
+				return nil, err
+			}
+
+			derivedCts := make(map[int]*Ciphertext, len(peers))
+			for _, peer := range peers {
+				derivedPad := dg.NewScalar()
+				if _, err := derivedPad.SetBytes(padBytesCache[peer.ID]); err != nil {
+					return nil, err
+				}
+				z := dg.NewScalar().Add(derivedPad, derivedShares[peer.ID])
+				R := dg.NewPoint().ScalarMult(derivedPad, dg.Generator())
+				derivedCts[peer.ID] = &Ciphertext{RCommitment: R, EncryptedShare: z}
+				derivedPad.Zero()
+			}
+
+			derivedCurves[idx] = &DerivedCurveData{
+				VSSCommitments: derivedVSS,
+				Ciphertexts:    derivedCts,
+			}
+			derivedPoly.Zero()
+			for id, share := range derivedShares {
+				if id != self.ID {
+					share.Zero()
+				}
+			}
+		}
+
+		// Zero cached pad bytes.
+		for id := range padBytesCache {
+			for i := range padBytesCache[id] {
+				padBytesCache[id][i] = 0
+			}
+		}
 	}
 
 	// Zero polynomial coefficients and omega after use.
@@ -135,8 +211,10 @@ func createDealingNoProofs(
 			Ciphertexts:    ciphertexts,
 			IdentityProof:  identityProof,
 			EVRFProofs:     map[int][]byte{}, // skipped
+			DerivedCurves:  derivedCurves,
 		},
-		PrivateShare: ownShare,
+		PrivateShare:         ownShare,
+		DerivedPrivateShares: derivedPrivateShares,
 	}, nil
 }
 
@@ -766,7 +844,10 @@ func TestTamperedCiphertextDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(outerG, poly, config.N)
+	shares, err := GenerateShares(outerG, poly, config.N)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	identityProof, err := ProveIdentity(innerG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
 	if err != nil {
@@ -841,7 +922,10 @@ func TestTamperedVSSCommitmentDetected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(outerG, poly, config.N)
+	shares, err := GenerateShares(outerG, poly, config.N)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	identityProof, err := ProveIdentity(innerG, participants[0].SK, participants[0].PK, config.SessionID, rand.Reader)
 	if err != nil {
@@ -1058,12 +1142,18 @@ func TestShareConsistentWithVSS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	shares := GenerateShares(outerG, poly, n)
+	shares, err := GenerateShares(outerG, poly, n)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// For each participant, f(i) * G should equal ExpectedShareCommitment(vss, i).
 	for i := 1; i <= n; i++ {
 		shareCommit := outerG.NewPoint().ScalarMult(shares[i], outerG.Generator())
-		expectedCommit := ExpectedShareCommitment(outerG, vssCommitments, i)
+		expectedCommit, err := ExpectedShareCommitment(outerG, vssCommitments, i)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if !shareCommit.Equal(expectedCommit) {
 			t.Errorf("node %d: share*G != ExpectedShareCommitment", i)
 		}

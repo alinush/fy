@@ -1,9 +1,12 @@
 package golden
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -39,6 +42,12 @@ const (
 	maxTranscriptSize = 500 << 20 // 500 MB
 
 	defaultCacheDir = ".cache/fy/srs" // relative to $HOME
+
+	// ignitionTranscriptSHA256 is the expected SHA-256 hash of transcript00.dat.
+	// TODO: Pin from a known-good Aztec Ignition ceremony download.
+	// Until pinned, the hash check is skipped; integrity relies on the
+	// pairing-based SRS consistency check in verifySRSConsistency.
+	ignitionTranscriptSHA256 = ""
 )
 
 // srsHTTPClient is used for downloading the transcript.
@@ -110,7 +119,7 @@ func LoadCeremonySRS(ccs constraint.ConstraintSystem) (canonical, lagrange kzg.S
 
 		// Cache for next time.
 		if cacheWriteErr := cacheSRS(cacheDir, canonicalSRS, lagrangeSRS); cacheWriteErr != nil {
-			fmt.Fprintf(os.Stderr, "golden: warning: failed to cache SRS: %v\n", cacheWriteErr)
+			slog.Warn("golden: failed to cache SRS", "error", cacheWriteErr)
 		}
 	}
 
@@ -139,6 +148,16 @@ func resolveCacheDir() (string, error) {
 }
 
 // loadCachedSRS attempts to load pre-cached gnark-format SRS files.
+//
+// NOTE: The Lagrange SRS is not independently verified against the canonical
+// SRS after loading from cache. The canonical SRS is verified via
+// verifySRSConsistency (pairing check), but the Lagrange form is trusted
+// to be the correct FFT of the canonical G1 points. If an attacker can
+// modify the cache directory, they could substitute a malicious Lagrange
+// SRS while leaving the canonical SRS intact. Mitigation: the cache
+// directory is created with 0700 permissions and cache files with 0600.
+// For additional integrity, callers could verify that the Lagrange SRS
+// is consistent with the canonical SRS via a spot-check pairing.
 func loadCachedSRS(cacheDir string, sizeCanonical, sizeLagrange int) (*kzg_bn254.SRS, *kzg_bn254.SRS, error) {
 	canonicalPath := filepath.Join(cacheDir, srsCanonicalFile)
 	lagrangePath := filepath.Join(cacheDir, srsLagrangeFile)
@@ -440,7 +459,7 @@ func downloadTranscript(dstPath string) error {
 		return fmt.Errorf("creating directory: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "golden: downloading Aztec Ignition ceremony transcript\n")
+	slog.Info("golden: downloading Aztec Ignition ceremony transcript")
 
 	resp, err := srsHTTPClient.Get(ignitionTranscriptURL)
 	if err != nil {
@@ -504,7 +523,7 @@ func downloadTranscript(dstPath string) error {
 			if total > 0 {
 				pct := int(written * 100 / total)
 				if pct/10 > lastPct/10 {
-					fmt.Fprintf(os.Stderr, "golden: download progress: %d%%\n", pct)
+					slog.Info("golden: download progress", "percent", pct)
 					lastPct = pct
 				}
 			}
@@ -522,6 +541,26 @@ func downloadTranscript(dstPath string) error {
 		return fmt.Errorf("unexpected transcript size: got %d bytes, expected %d", written, ignitionTranscriptExpectedSize)
 	}
 
+	// SHA-256 content hash verification for defense-in-depth.
+	// The primary integrity guarantee comes from the pairing-based SRS
+	// consistency check in verifySRSConsistency, which cryptographically
+	// verifies all G1 powers are consistent with the G2 elements. This
+	// hash check detects corruption earlier (before parsing).
+	if ignitionTranscriptSHA256 != "" {
+		if _, err := tmpFile.Seek(0, io.SeekStart); err != nil {
+			return fmt.Errorf("seeking to start for hash: %w", err)
+		}
+		h := sha256.New()
+		if _, err := io.Copy(h, tmpFile); err != nil {
+			return fmt.Errorf("computing transcript hash: %w", err)
+		}
+		computedHash := hex.EncodeToString(h.Sum(nil))
+		if computedHash != ignitionTranscriptSHA256 {
+			return fmt.Errorf("transcript hash mismatch: expected %s, got %s",
+				ignitionTranscriptSHA256, computedHash)
+		}
+	}
+
 	if err := tmpFile.Sync(); err != nil {
 		return fmt.Errorf("syncing temp file: %w", err)
 	}
@@ -534,6 +573,6 @@ func downloadTranscript(dstPath string) error {
 		return fmt.Errorf("renaming transcript: %w", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "golden: transcript downloaded (%d bytes)\n", written)
+	slog.Info("golden: transcript downloaded", "bytes", written)
 	return nil
 }

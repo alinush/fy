@@ -71,9 +71,13 @@ func TestFullSigningCycle(t *testing.T) {
 	// Sign using session package (like the daemon does)
 	t.Log("Signing...")
 	sp1, _ := session.NewParticipantWithHasher(g, 2, 2, 1, frost.NewRailgunHasher())
-	sp1.SetKeyShare(ks1)
+	if err := sp1.SetKeyShare(ks1); err != nil {
+		t.Fatalf("failed to set key share for sp1: %v", err)
+	}
 	sp2, _ := session.NewParticipantWithHasher(g, 2, 2, 2, frost.NewRailgunHasher())
-	sp2.SetKeyShare(ks2)
+	if err := sp2.SetKeyShare(ks2); err != nil {
+		t.Fatalf("failed to set key share for sp2: %v", err)
+	}
 
 	sess1, _ := sp1.NewSigningSession(rand.Reader, msgHash.Bytes())
 	sess2, _ := sp2.NewSigningSession(rand.Reader, msgHash.Bytes())

@@ -10,6 +10,7 @@ package dkls23
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"slices"
@@ -20,7 +21,7 @@ import (
 // InteractiveDLogProof represents Schnorr's protocol (interactive version).
 type InteractiveDLogProof struct {
 	Challenge        []byte       // T-bit challenge
-	ChallengeReponse group.Scalar // z = r - e*s
+	ChallengeResponse group.Scalar // z = r - e*s
 }
 
 // dlogProveStep1 samples random commitments.
@@ -53,7 +54,7 @@ func dlogProveStep2(scalar, scalarRandCommitment group.Scalar, challenge []byte)
 
 	return &InteractiveDLogProof{
 		Challenge:        challenge,
-		ChallengeReponse: challengeResponse,
+		ChallengeResponse: challengeResponse,
 	}
 }
 
@@ -66,7 +67,7 @@ func verifyInteractiveDLogProof(proof *InteractiveDLogProof, point, pointRandCom
 	challengeScalar, _ := ScalarFromBytes(extended)
 
 	// Verify: z*G + e*point == pointRandCommitment
-	lhs := PointAdd(ScalarBaseMult(proof.ChallengeReponse), ScalarMult(point, challengeScalar))
+	lhs := PointAdd(ScalarBaseMult(proof.ChallengeResponse), ScalarMult(point, challengeScalar))
 	return PointEqual(lhs, pointRandCommitment)
 }
 
@@ -92,6 +93,14 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 		randCommitments[i] = randCommitment
 		states[i] = state
 	}
+	// Zero secret nonce scalars after proofs are assembled.
+	defer func() {
+		for _, s := range states {
+			if s != nil {
+				s.Zero()
+			}
+		}
+	}()
 
 	// Convert commitments to bytes for hashing
 	rcAsBytes := make([]byte, 0)
@@ -136,7 +145,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 			// Compute first hash
 			iBytes := make([]byte, 2)
 			binary.BigEndian.PutUint16(iBytes, uint16(i))
-			firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, firstChallenge, firstProof.ChallengeReponse.Bytes())
+			firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, firstChallenge, firstProof.ChallengeResponse.Bytes())
 			firstHashFull := Hash(firstMsg, sessionID)
 			firstHash := firstHashFull[:FischlinL/4]
 
@@ -161,7 +170,7 @@ func NewDLogProof(scalar group.Scalar, sessionID []byte) (*DLogProof, error) {
 				// Compute second hash
 				i2Bytes := make([]byte, 2)
 				binary.BigEndian.PutUint16(i2Bytes, uint16(i+FischlinR/2))
-				secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, secondChallenge, secondProof.ChallengeReponse.Bytes())
+				secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, secondChallenge, secondProof.ChallengeResponse.Bytes())
 				secondHashFull := Hash(secondMsg, sessionID)
 				secondHash := secondHashFull[:FischlinL/4]
 
@@ -231,14 +240,14 @@ func (p *DLogProof) Verify(sessionID []byte) bool {
 		// Compute first hash
 		iBytes := make([]byte, 2)
 		binary.BigEndian.PutUint16(iBytes, uint16(i))
-		firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, p.Proofs[i].Challenge, p.Proofs[i].ChallengeReponse.Bytes())
+		firstMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, iBytes, p.Proofs[i].Challenge, p.Proofs[i].ChallengeResponse.Bytes())
 		firstHashFull := Hash(firstMsg, sessionID)
 		firstHash := firstHashFull[:FischlinL/4]
 
 		// Compute second hash
 		i2Bytes := make([]byte, 2)
 		binary.BigEndian.PutUint16(i2Bytes, uint16(i+FischlinR/2))
-		secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, p.Proofs[i+FischlinR/2].Challenge, p.Proofs[i+FischlinR/2].ChallengeReponse.Bytes())
+		secondMsg := slices.Concat(PointToBytes(Generator()), rcAsBytes, i2Bytes, p.Proofs[i+FischlinR/2].Challenge, p.Proofs[i+FischlinR/2].ChallengeResponse.Bytes())
 		secondHashFull := Hash(secondMsg, sessionID)
 		secondHash := secondHashFull[:FischlinL/4]
 
@@ -271,10 +280,11 @@ type CPProof struct {
 	BaseH            group.Point
 	PointU           group.Point
 	PointV           group.Point
-	ChallengeReponse group.Scalar
+	ChallengeResponse group.Scalar
 }
 
 // cpProveStep1 samples random commitments for Chaum-Pedersen.
+// The returned scalar is a secret commitment; callers must zero it after use.
 func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments, error) {
 	// Sample a nonzero random scalar. RandomScalar already excludes zero for
 	// secp256k1 (~0% rejection rate), so this loop is defense-in-depth.
@@ -293,6 +303,7 @@ func cpProveStep1(baseG, baseH group.Point) (group.Scalar, *RandomCommitments, e
 }
 
 // cpProveStep2 computes the response for Chaum-Pedersen.
+// The scalarRandCommitment parameter is a secret nonce; callers must zero it after use.
 func cpProveStep2(baseG, baseH group.Point, scalar, scalarRandCommitment, challenge group.Scalar) *CPProof {
 	pointU := ScalarMult(baseG, scalar)
 	pointV := ScalarMult(baseH, scalar)
@@ -303,16 +314,16 @@ func cpProveStep2(baseG, baseH group.Point, scalar, scalarRandCommitment, challe
 		BaseH:            baseH,
 		PointU:           pointU,
 		PointV:           pointV,
-		ChallengeReponse: challengeResponse,
+		ChallengeResponse: challengeResponse,
 	}
 }
 
 // verifyCPProof verifies a Chaum-Pedersen proof.
 func verifyCPProof(proof *CPProof, randCommitments *RandomCommitments, challenge group.Scalar) bool {
 	// z*G + e*U == RcG
-	pointVerifyG := PointAdd(ScalarMult(proof.BaseG, proof.ChallengeReponse), ScalarMult(proof.PointU, challenge))
+	pointVerifyG := PointAdd(ScalarMult(proof.BaseG, proof.ChallengeResponse), ScalarMult(proof.PointU, challenge))
 	// z*H + e*V == RcH
-	pointVerifyH := PointAdd(ScalarMult(proof.BaseH, proof.ChallengeReponse), ScalarMult(proof.PointV, challenge))
+	pointVerifyH := PointAdd(ScalarMult(proof.BaseH, proof.ChallengeResponse), ScalarMult(proof.PointV, challenge))
 
 	return PointEqual(pointVerifyG, randCommitments.RcG) && PointEqual(pointVerifyH, randCommitments.RcH)
 }
@@ -337,7 +348,7 @@ func cpSimulate(baseG, baseH, pointU, pointV group.Point) (*RandomCommitments, g
 		BaseH:            baseH,
 		PointU:           pointU,
 		PointV:           pointV,
-		ChallengeReponse: challengeResponse,
+		ChallengeResponse: challengeResponse,
 	}, nil
 }
 
@@ -374,6 +385,8 @@ func NewEncProof(sessionID []byte, baseH group.Point, scalar group.Scalar, bit b
 	if err != nil {
 		return nil, err
 	}
+	// Zero the secret nonce after the proof is assembled.
+	defer realScalarCommitment.Zero()
 
 	// Fake proof (simulated)
 	fakeCommitments, fakeChallenge, fakeProof, err := cpSimulate(baseG, baseH, fakeV, u)
@@ -450,6 +463,11 @@ func (p *EncProof) Verify(sessionID []byte) bool {
 		return false
 	}
 
+	// Reject zero challenges (trivially forgeable)
+	if IsZero(p.Challenge0) || IsZero(p.Challenge1) {
+		return false
+	}
+
 	// Check proof0.PointU == proof1.PointU + H
 	expectedU := PointAdd(p.Proof1.PointU, p.Proof1.BaseH)
 	if !PointEqual(p.Proof0.PointU, expectedU) {
@@ -503,7 +521,7 @@ func CommitPoint(point group.Point) (HashOutput, []byte, error) {
 func VerifyCommitmentPoint(point group.Point, commitment HashOutput, salt []byte) bool {
 	pointBytes := PointToBytes(point)
 	expected := Hash(pointBytes, salt)
-	return bytes.Equal(commitment[:], expected[:])
+	return subtle.ConstantTimeCompare(commitment[:], expected[:]) == 1
 }
 
 // Serialize serializes a DLogProof to bytes.
@@ -530,7 +548,7 @@ func (p *DLogProof) Serialize() []byte {
 		buf.Write(uint16ToBytes(uint16(len(proof.Challenge))))
 		buf.Write(proof.Challenge)
 		// Response
-		respBytes := proof.ChallengeReponse.Bytes()
+		respBytes := proof.ChallengeResponse.Bytes()
 		buf.Write(uint16ToBytes(uint16(len(respBytes))))
 		buf.Write(respBytes)
 	}
@@ -608,8 +626,8 @@ func DeserializeDLogProof(data []byte) (*DLogProof, error) {
 		}
 		challengeLen := int(binary.BigEndian.Uint16(data[offset:]))
 		offset += 2
-		// FischlinT/8 = 4 bytes is the expected challenge length
-		if challengeLen > FischlinT/8 {
+		// FischlinT/8 = 4 bytes is the exact expected challenge length
+		if challengeLen != FischlinT/8 {
 			return nil, ErrInvalidProof
 		}
 		if offset+challengeLen > len(data) {
@@ -632,7 +650,7 @@ func DeserializeDLogProof(data []byte) (*DLogProof, error) {
 		if err != nil {
 			return nil, err
 		}
-		proof.ChallengeReponse = resp
+		proof.ChallengeResponse = resp
 		offset += respLen
 
 		p.Proofs[i] = proof
@@ -655,7 +673,7 @@ func (p *EncProof) Serialize() []byte {
 		buf.Write(PointToBytes(cp.PointU))
 		buf.Write(uint16ToBytes(uint16(len(PointToBytes(cp.PointV)))))
 		buf.Write(PointToBytes(cp.PointV))
-		respBytes := cp.ChallengeReponse.Bytes()
+		respBytes := cp.ChallengeResponse.Bytes()
 		buf.Write(uint16ToBytes(uint16(len(respBytes))))
 		buf.Write(respBytes)
 	}
@@ -739,7 +757,7 @@ func DeserializeEncProof(data []byte) (*EncProof, error) {
 		if cp.PointV, err = readPoint(); err != nil {
 			return nil, err
 		}
-		if cp.ChallengeReponse, err = readScalar(); err != nil {
+		if cp.ChallengeResponse, err = readScalar(); err != nil {
 			return nil, err
 		}
 		return cp, nil

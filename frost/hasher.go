@@ -7,6 +7,7 @@ import (
 	"hash"
 	"math"
 	"math/big"
+	"runtime"
 
 	"github.com/f3rmion/fy/group"
 	"github.com/iden3/go-iden3-crypto/poseidon"
@@ -42,14 +43,31 @@ type Hasher interface {
 	H3(g group.Group, seed, rho, msg []byte) group.Scalar
 
 	// H4 hashes a message for signing.
+	// Currently unused by the core FROST protocol but defined as part of the
+	// FROST specification (RFC 9591, Section 4.7) for pre-hashing messages.
+	// Retained for specification completeness and future use.
 	H4(g group.Group, msg []byte) []byte
 
 	// H5 hashes the commitment list.
+	// Currently unused by the core FROST protocol but defined as part of the
+	// FROST specification (RFC 9591, Section 4.7) for commitment list hashing.
+	// Retained for specification completeness and future use.
 	H5(g group.Group, encCommitList []byte) []byte
 }
 
 // SHA256Hasher implements Hasher using SHA-256.
 // This is the default hasher for general use.
+//
+// Domain separation prefixes:
+//   - H1: "rho"  (binding factor)
+//   - H2: "chal" (Schnorr challenge)
+//   - H3: "nonce" (nonce derivation)
+//   - H4: "msg"  (message pre-hash)
+//   - H5: "com"  (commitment list hash)
+//
+// Each hash output is expanded to 64 bytes (two SHA-256 invocations with
+// counter suffixes 0x00 and 0x01) for uniform reduction modulo the group
+// order (bias < 2^-128).
 type SHA256Hasher struct{}
 
 func (h *SHA256Hasher) hash(data ...[]byte) []byte {
@@ -82,6 +100,15 @@ func (h *SHA256Hasher) hashToScalar(g group.Group, data ...[]byte) group.Scalar 
 	n := new(big.Int).SetBytes(expanded)
 	order := new(big.Int).SetBytes(g.Order())
 	n.Mod(n, order)
+
+	// Zero the intermediate big.Int to prevent secret hash material from persisting.
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+	}()
 
 	s := g.NewScalar()
 	nBytes := n.Bytes()
@@ -139,7 +166,10 @@ func NewBlake2bHasher() *Blake2bHasher {
 }
 
 func (h *Blake2bHasher) hash(tag string, data ...[]byte) []byte {
-	hasher, _ := blake2b.New512(nil)
+	hasher, err := blake2b.New512(nil)
+	if err != nil {
+		panic("blake2b.New512: " + err.Error())
+	}
 	writeLengthPrefixed(hasher, []byte(h.Prefix))
 	writeLengthPrefixed(hasher, []byte(tag))
 	for _, d := range data {
@@ -163,6 +193,15 @@ func (h *Blake2bHasher) hashToScalar(g group.Group, tag string, data ...[]byte) 
 	n := new(big.Int).SetBytes(reversed)
 	order := new(big.Int).SetBytes(g.Order())
 	n.Mod(n, order)
+
+	// Zero the intermediate big.Int to prevent secret hash material from persisting.
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+	}()
 
 	s := g.NewScalar()
 	nBytes := n.Bytes()
@@ -215,6 +254,14 @@ func (h *Blake2bHasher) H5(g group.Group, encCommitList []byte) []byte {
 //
 // Domain separation is achieved using unique initial field element values
 // for each hash function (H1-H5).
+//
+// KNOWN LIMITATION (BJJ subgroup bias): For BJJ subgroup (~251-bit order),
+// simple modular reduction of a ~254-bit Poseidon output introduces statistical
+// bias of ~7/8 statistical distance from uniform. For applications requiring
+// full 128-bit uniformity with BJJ, use [SHA256Hasher] or [Blake2bHasher] instead.
+//
+// H1-H3 panic on hash errors. This represents an invariant violation (nil inputs
+// or corrupted state), not a recoverable runtime condition.
 type PoseidonHasher struct {
 	domainH1 *big.Int
 	domainH2 *big.Int
@@ -372,20 +419,27 @@ func poseidonHash(elements []*big.Int) (*big.Int, error) {
 }
 
 // H1 implements Hasher.H1 (binding factor computation).
-// Hashes: domain_H1 || msg || encCommitList || signerID as field elements.
+// Hashes: domain_H1 || len(msgElems) || msg || len(commitElems) || encCommitList || signerID
+// as field elements.
 //
-// Length prefixes are omitted since bytesToFieldElements uses fixed 31-byte chunks,
-// making element count deterministic from byte length. Boundary ambiguity between
-// msg and encCommitList is mitigated by:
-//   - encCommitList starts with a 4-byte count prefix (always a small integer)
-//   - signerID is always exactly 32 bytes (one field element)
-//   - Domain separator provides session-level separation
-//
-// For large signer counts the sponge construction handles arbitrary input lengths.
+// Each variable-length input (msg, encCommitList) is preceded by its element count
+// encoded as a field element. This length-prefixed encoding prevents concatenation
+// ambiguity: two different (msg, encCommitList) pairs that produce the same
+// concatenated field elements will have different length prefixes.
+// signerID is always exactly 32 bytes (one field element) so no prefix is needed.
 func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) group.Scalar {
 	elements := []*big.Int{h.domainH1}
-	elements = append(elements, bytesToFieldElements(msg)...)
-	elements = append(elements, bytesToFieldElements(encCommitList)...)
+
+	// Length-prefix msg field elements to prevent boundary ambiguity
+	msgElems := bytesToFieldElements(msg)
+	elements = append(elements, big.NewInt(int64(len(msgElems))))
+	elements = append(elements, msgElems...)
+
+	// Length-prefix encCommitList field elements
+	commitElems := bytesToFieldElements(encCommitList)
+	elements = append(elements, big.NewInt(int64(len(commitElems))))
+	elements = append(elements, commitElems...)
+
 	elements = append(elements, new(big.Int).SetBytes(signerID))
 
 	hash, err := poseidonHash(elements)
@@ -398,12 +452,26 @@ func (h *PoseidonHasher) H1(g group.Group, msg, encCommitList, signerID []byte) 
 }
 
 // H2 implements Hasher.H2 (Schnorr challenge).
-// Hashes: domain_H2 || R.X || R.Y || Y.X || Y.Y || msg as field elements.
+// Hashes: domain_H2 || len(R_elems) || R || len(Y_elems) || Y || len(msg_elems) || msg
+// as field elements.
+//
+// Each variable-length input is preceded by its element count to prevent
+// concatenation ambiguity: different point encodings (compressed vs uncompressed)
+// produce different element counts, and variable-length messages are delimited.
 func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 	elements := []*big.Int{h.domainH2}
-	elements = append(elements, pointBytesToFieldElements(R)...)
-	elements = append(elements, pointBytesToFieldElements(Y)...)
-	elements = append(elements, bytesToFieldElements(msg)...)
+
+	rElems := pointBytesToFieldElements(R)
+	elements = append(elements, big.NewInt(int64(len(rElems))))
+	elements = append(elements, rElems...)
+
+	yElems := pointBytesToFieldElements(Y)
+	elements = append(elements, big.NewInt(int64(len(yElems))))
+	elements = append(elements, yElems...)
+
+	msgElems := bytesToFieldElements(msg)
+	elements = append(elements, big.NewInt(int64(len(msgElems))))
+	elements = append(elements, msgElems...)
 
 	hash, err := poseidonHash(elements)
 	if err != nil {
@@ -414,19 +482,26 @@ func (h *PoseidonHasher) H2(g group.Group, R, Y, msg []byte) group.Scalar {
 }
 
 // H3 implements Hasher.H3 (nonce generation).
-// Hashes: domain_H3 || seed || rho || msg as field elements.
+// Hashes: domain_H3 || len(seed_elems) || seed || len(rho_elems) || rho || len(msg_elems) || msg
+// as field elements.
 //
-// Length prefixes are omitted since bytesToFieldElements uses fixed 31-byte chunks,
-// making element count deterministic from byte length. Boundary ambiguity is
-// mitigated by:
-//   - seed is always exactly 32 bytes (one field element)
-//   - rho is always exactly 32 bytes (one field element)
-//   - Domain separator provides session-level separation
+// Length prefixes are included for defense-in-depth, even though seed and rho are
+// typically fixed-length (32 bytes each). This prevents boundary ambiguity if
+// callers pass non-standard lengths.
 func (h *PoseidonHasher) H3(g group.Group, seed, rho, msg []byte) group.Scalar {
 	elements := []*big.Int{h.domainH3}
-	elements = append(elements, bytesToFieldElements(seed)...)
-	elements = append(elements, bytesToFieldElements(rho)...)
-	elements = append(elements, bytesToFieldElements(msg)...)
+
+	seedElems := bytesToFieldElements(seed)
+	elements = append(elements, big.NewInt(int64(len(seedElems))))
+	elements = append(elements, seedElems...)
+
+	rhoElems := bytesToFieldElements(rho)
+	elements = append(elements, big.NewInt(int64(len(rhoElems))))
+	elements = append(elements, rhoElems...)
+
+	msgElems := bytesToFieldElements(msg)
+	elements = append(elements, big.NewInt(int64(len(msgElems))))
+	elements = append(elements, msgElems...)
 
 	hash, err := poseidonHash(elements)
 	if err != nil {
@@ -574,6 +649,9 @@ func (h *RailgunHasher) extractPkCoordinatesDiv8(g group.Group, data []byte) (*b
 
 // circomScalarMult performs scalar multiplication on the circomlibjs Baby JubJub curve.
 // Computes s * P where P = (px, py) is a point on the curve with A=168700, D=168696.
+//
+// WARNING: This function uses math/big which is NOT constant-time. Safe only
+// because inv8 is a public constant.
 func (h *RailgunHasher) circomScalarMult(px, py, s *big.Int) (*big.Int, *big.Int) {
 	// fieldP is the Baby JubJub base field modulus, which equals the BN254 scalar field (Fr).
 	// BJJ is defined as a twisted Edwards curve embedded in BN254's scalar field.

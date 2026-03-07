@@ -17,10 +17,18 @@ import (
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254"
 	"github.com/consensys/gnark-crypto/ecc/bn254/fr"
 	"github.com/f3rmion/fy/group"
+)
+
+// Compile-time interface checks.
+var (
+	_ group.Group  = (*BN254G1)(nil)
+	_ group.Scalar = (*Scalar)(nil)
+	_ group.Point  = (*Point)(nil)
 )
 
 // Scalar represents an element of the BN254 scalar field (Fr).
@@ -117,10 +125,15 @@ func (s *Scalar) Bytes() []byte {
 }
 
 // SetBytes sets s from a big-endian byte slice and returns s.
-// For inputs up to 32 bytes, the value is set via SetBytesCanonical (must be < r).
+// For inputs up to 32 bytes, the value is first tried via SetBytesCanonical.
+// If the value is non-canonical (>= r), it is silently reduced modulo r via
+// big.Int. This silent reduction is by design: it supports hash-to-field and
+// ECDSA r-value conversion where non-canonical inputs are standard practice
+// (see SEC 1 v2, Section 4.1.3). Callers who need strict canonical-only
+// acceptance should check the input range before calling SetBytes.
 // For inputs up to 64 bytes (hash-to-field with 128-bit security margin),
 // the value is reduced modulo r via big.Int.
-// Returns an error if the input exceeds 64 bytes or is not a valid field element.
+// Returns an error if the input exceeds 64 bytes or if reduction itself fails.
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 	if len(data) > 64 {
 		return nil, errors.New("scalar input exceeds 64 bytes")
@@ -130,7 +143,7 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 		var buf [fr.Bytes]byte
 		copy(buf[32-len(data):], data)
 		if err := s.inner.SetBytesCanonical(buf[:]); err != nil {
-			// If canonical fails (value >= r), fall back to big.Int reduction
+			// Non-canonical value (>= r): reduce mod r
 			n := new(big.Int).SetBytes(data)
 			n.Mod(n, fr.Modulus())
 			// Convert reduced value back to bytes and set canonically
@@ -176,6 +189,7 @@ func (s *Scalar) Zero() {
 	s.inner[2] = 0
 	s.inner[3] = 0
 	s.inner.SetZero()
+	runtime.KeepAlive(&s.inner)
 }
 
 // Point represents a point on the BN254 G1 curve.
@@ -224,12 +238,20 @@ func (p *Point) Negate(a group.Point) group.Point {
 
 // ScalarMult sets p to s * q and returns p.
 // Converts the scalar to big.Int for use with gnark-crypto's ScalarMultiplication.
+// The temporary big.Int is securely zeroed after use to prevent scalar leakage.
 func (p *Point) ScalarMult(s group.Scalar, q group.Point) group.Point {
 	scalar := assertScalar(s)
 	qPoint := assertPoint(q)
-	bigInt := new(big.Int)
-	scalar.inner.BigInt(bigInt)
-	p.inner.ScalarMultiplication(&qPoint.inner, bigInt)
+	n := new(big.Int)
+	scalar.inner.BigInt(n)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+	}()
+	p.inner.ScalarMultiplication(&qPoint.inner, n)
 	return p
 }
 
@@ -253,6 +275,9 @@ func (p *Point) Bytes() []byte {
 func (p *Point) SetBytes(data []byte) (group.Point, error) {
 	if err := p.inner.Unmarshal(data); err != nil {
 		return nil, err
+	}
+	if !p.inner.IsOnCurve() {
+		return nil, errors.New("point is not on curve")
 	}
 	return p, nil
 }
@@ -279,6 +304,7 @@ func (p *Point) Zero() {
 		p.inner.Y[i] = 0
 	}
 	// Zero value of G1Affine is the point at infinity.
+	runtime.KeepAlive(&p.inner)
 }
 
 // BN254G1 implements [group.Group] for the BN254 G1 curve.
@@ -341,6 +367,8 @@ func (g *BN254G1) RandomScalar(r io.Reader) (group.Scalar, error) {
 func (g *BN254G1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	hashWith := func(counter byte) []byte {
 		h := sha256.New()
+		// Domain separator: prevent cross-curve hash collisions.
+		h.Write([]byte("BN254G1"))
 		for _, d := range data {
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
@@ -357,6 +385,14 @@ func (g *BN254G1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 
 	// Interpret as big-endian integer and reduce mod r
 	n := new(big.Int).SetBytes(expanded)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+		n.SetInt64(0)
+	}()
 	n.Mod(n, fr.Modulus())
 
 	s := newScalar()
@@ -370,6 +406,7 @@ func (g *BN254G1) HashToScalar(data ...[]byte) (group.Scalar, error) {
 }
 
 // Order returns the order of the BN254 scalar field (Fr) as a big-endian byte slice.
+// Returns a fresh copy of the group order.
 func (g *BN254G1) Order() []byte {
 	return fr.Modulus().Bytes()
 }
