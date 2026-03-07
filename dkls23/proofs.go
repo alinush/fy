@@ -20,7 +20,7 @@ import (
 
 // InteractiveDLogProof represents Schnorr's protocol (interactive version).
 type InteractiveDLogProof struct {
-	Challenge        []byte       // T-bit challenge
+	Challenge         []byte       // T-bit challenge
 	ChallengeResponse group.Scalar // z = r - e*s
 }
 
@@ -53,7 +53,7 @@ func dlogProveStep2(scalar, scalarRandCommitment group.Scalar, challenge []byte)
 	challengeResponse := ScalarSub(scalarRandCommitment, ScalarMul(challengeScalar, scalar))
 
 	return &InteractiveDLogProof{
-		Challenge:        challenge,
+		Challenge:         challenge,
 		ChallengeResponse: challengeResponse,
 	}
 }
@@ -276,10 +276,10 @@ type RandomCommitments struct {
 
 // CPProof is the Chaum-Pedersen protocol (interactive version).
 type CPProof struct {
-	BaseG            group.Point // Parameters for the proof
-	BaseH            group.Point
-	PointU           group.Point
-	PointV           group.Point
+	BaseG             group.Point // Parameters for the proof
+	BaseH             group.Point
+	PointU            group.Point
+	PointV            group.Point
 	ChallengeResponse group.Scalar
 }
 
@@ -310,10 +310,10 @@ func cpProveStep2(baseG, baseH group.Point, scalar, scalarRandCommitment, challe
 	challengeResponse := ScalarSub(scalarRandCommitment, ScalarMul(challenge, scalar))
 
 	return &CPProof{
-		BaseG:            baseG,
-		BaseH:            baseH,
-		PointU:           pointU,
-		PointV:           pointV,
+		BaseG:             baseG,
+		BaseH:             baseH,
+		PointU:            pointU,
+		PointV:            pointV,
 		ChallengeResponse: challengeResponse,
 	}
 }
@@ -344,10 +344,10 @@ func cpSimulate(baseG, baseH, pointU, pointV group.Point) (*RandomCommitments, g
 	rcH := PointAdd(ScalarMult(baseH, challengeResponse), ScalarMult(pointV, challenge))
 
 	return &RandomCommitments{RcG: rcG, RcH: rcH}, challenge, &CPProof{
-		BaseG:            baseG,
-		BaseH:            baseH,
-		PointU:           pointU,
-		PointV:           pointV,
+		BaseG:             baseG,
+		BaseH:             baseH,
+		PointU:            pointU,
+		PointV:            pointV,
 		ChallengeResponse: challengeResponse,
 	}, nil
 }

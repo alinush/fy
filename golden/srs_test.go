@@ -243,13 +243,13 @@ func TestParseIgnitionTranscript_Synthetic(t *testing.T) {
 
 	// Build manifest (28 bytes, all big-endian).
 	var manifest [28]byte
-	binary.BigEndian.PutUint32(manifest[0:4], 0)       // TranscriptNumber
-	binary.BigEndian.PutUint32(manifest[4:8], 1)       // TotalTranscripts
-	binary.BigEndian.PutUint32(manifest[8:12], 3)      // TotalG1Points
-	binary.BigEndian.PutUint32(manifest[12:16], 2)     // TotalG2Points
+	binary.BigEndian.PutUint32(manifest[0:4], 0)               // TranscriptNumber
+	binary.BigEndian.PutUint32(manifest[4:8], 1)               // TotalTranscripts
+	binary.BigEndian.PutUint32(manifest[8:12], 3)              // TotalG1Points
+	binary.BigEndian.PutUint32(manifest[12:16], 2)             // TotalG2Points
 	binary.BigEndian.PutUint32(manifest[16:20], uint32(numG1)) // NumG1Points
 	binary.BigEndian.PutUint32(manifest[20:24], uint32(numG2)) // NumG2Points
-	binary.BigEndian.PutUint32(manifest[24:28], 0)     // StartFrom
+	binary.BigEndian.PutUint32(manifest[24:28], 0)             // StartFrom
 
 	// Encode G1 generator in Aztec format (3 copies).
 	g1AztecBytes := pointToAztecG1(g1Gen)
@@ -336,4 +336,3 @@ func pointToAztecG2(p bn254.G2Affine) []byte {
 func stdBEToAztec(dst, src []byte) {
 	aztecToStdBE(dst, src)
 }
-
