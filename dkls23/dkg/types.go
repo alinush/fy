@@ -3,6 +3,7 @@
 package dkg
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 
@@ -44,6 +45,9 @@ func (s *SessionData) ValidateSession() error {
 	}
 	if s.PartyIndex < 1 || s.PartyIndex > s.Parameters.ShareCount {
 		return errors.New("party index must be between 1 and share count")
+	}
+	if len(s.SessionID) < 16 {
+		return errors.New("session ID must be at least 16 bytes")
 	}
 	return nil
 }
@@ -143,25 +147,22 @@ type Phase4Input struct {
 	MulReceived       []*Phase3to4MulTransmit
 }
 
-// CommitBytes creates a hash commitment to bytes
+// CommitBytes creates a hash commitment to bytes.
+// Uses the same pattern as CommitPoint: Hash(data, salt) where salt is a
+// separate parameter, ensuring consistent domain separation across commitments.
 func CommitBytes(data []byte) (dkls23.HashOutput, []byte, error) {
 	salt, err := dkls23.RandBytes(32)
 	if err != nil {
 		return dkls23.HashOutput{}, nil, err
 	}
-	combined := make([]byte, len(data)+len(salt))
-	copy(combined, data)
-	copy(combined[len(data):], salt)
-	return dkls23.Hash(combined, nil), salt, nil
+	return dkls23.Hash(data, salt), salt, nil
 }
 
-// VerifyCommitBytes verifies a byte commitment
+// VerifyCommitBytes verifies a byte commitment.
+// Uses the same pattern as VerifyCommitmentPoint: Hash(data, salt).
 func VerifyCommitBytes(data []byte, commitment dkls23.HashOutput, salt []byte) bool {
-	combined := make([]byte, len(data)+len(salt))
-	copy(combined, data)
-	copy(combined[len(data):], salt)
-	computed := dkls23.Hash(combined, nil)
-	return computed == commitment
+	computed := dkls23.Hash(data, salt)
+	return subtle.ConstantTimeCompare(computed[:], commitment[:]) == 1
 }
 
 // GenerateZeroSeedWithCommitment generates a seed and its commitment
@@ -186,13 +187,17 @@ func VerifyZeroSeed(seed *ZeroSeed, commitment dkls23.HashOutput, salt []byte) b
 
 // GenerateZeroSeedPair combines two seeds into a shared seed pair
 func GenerateZeroSeedPair(myIndex, theirIndex uint8, mySeed, theirSeed *ZeroSeed) *sign.ZeroSeedPair {
+	if myIndex == theirIndex {
+		panic("GenerateZeroSeedPair called with identical indices")
+	}
+
 	var combinedSeed ZeroSeed
 	for i := 0; i < dkls23.Security; i++ {
 		combinedSeed[i] = mySeed[i] ^ theirSeed[i]
 	}
 
 	return &sign.ZeroSeedPair{
-		LowestIndex:       myIndex <= theirIndex,
+		LowestIndex:       myIndex < theirIndex,
 		IndexCounterparty: theirIndex,
 		Seed:              combinedSeed,
 	}

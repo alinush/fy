@@ -321,30 +321,44 @@ func TestSetKeyShare(t *testing.T) {
 
 	g := &bjj.BJJ{}
 	threshold := 2
-	total := 3
-	allIDs := []int{1, 2, 3}
+	total := 2
+	allIDs := []int{1, 2}
 
-	// Run DKG for first participant only
+	// Run DKG with both participants
 	p1, _ := NewParticipant(g, threshold, total, 1)
 	p2, _ := NewParticipant(g, threshold, total, 2)
 
-	r1_1, _ := p1.GenerateRound1(rand.Reader, allIDs)
-	r1_2, _ := p2.GenerateRound1(rand.Reader, allIDs)
+	r1_1, err := p1.GenerateRound1(rand.Reader, allIDs)
+	if err != nil {
+		t.Fatalf("GenerateRound1 p1 failed: %v", err)
+	}
+	r1_2, err := p2.GenerateRound1(rand.Reader, allIDs)
+	if err != nil {
+		t.Fatalf("GenerateRound1 p2 failed: %v", err)
+	}
 
 	broadcasts := []*frost.Round1Data{r1_1.Broadcast, r1_2.Broadcast}
 
-	result1, _ := p1.ProcessRound1(&Round1Input{
+	result1, err := p1.ProcessRound1(&Round1Input{
 		Broadcasts:    broadcasts,
 		PrivateShares: []*frost.Round1PrivateData{r1_2.PrivateShares[1]},
 	})
-	result2, _ := p2.ProcessRound1(&Round1Input{
+	if err != nil {
+		t.Fatalf("ProcessRound1 p1 failed: %v", err)
+	}
+	result2, err := p2.ProcessRound1(&Round1Input{
 		Broadcasts:    broadcasts,
 		PrivateShares: []*frost.Round1PrivateData{r1_1.PrivateShares[2]},
 	})
+	if err != nil {
+		t.Fatalf("ProcessRound1 p2 failed: %v", err)
+	}
 
 	// Create a new participant and set key share (simulating restore from storage)
 	p1Restored, _ := NewParticipant(g, threshold, total, 1)
-	p1Restored.SetKeyShare(result1.KeyShare)
+	if err := p1Restored.SetKeyShare(result1.KeyShare); err != nil {
+		t.Fatalf("failed to set key share: %v", err)
+	}
 
 	// Should be able to sign with restored participant
 	message := []byte("restored participant test")

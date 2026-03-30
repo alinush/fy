@@ -2,6 +2,7 @@ package dkg
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 
 	"github.com/f3rmion/fy/dkls23"
@@ -99,6 +100,13 @@ func Step5(params *Parameters, partyIndex uint8, sessionID []byte, proofsCommitm
 	var pk group.Point
 
 	for i := uint8(1); i <= params.ShareCount-params.Threshold+1; i++ {
+		// Validate all required indices are present before Lagrange interpolation.
+		for j := i; j < i+params.Threshold; j++ {
+			if _, ok := committedPoints[j]; !ok {
+				return nil, fmt.Errorf("missing proof commitment for party %d", j)
+			}
+		}
+
 		currentPK := dkls23.NewPoint()
 
 		for j := i; j < i+params.Threshold; j++ {
@@ -154,11 +162,24 @@ func Phase1(data *SessionData) (*Phase1Output, error) {
 		return nil, err
 	}
 	points := Step2(&data.Parameters, polynomial)
+
+	// Zero polynomial coefficients (secret material no longer needed).
+	for _, coeff := range polynomial {
+		coeff.Zero()
+	}
+
 	return &Phase1Output{PolyPoints: points}, nil
 }
 
 // Phase2 executes DKG phase 2
 func Phase2(data *SessionData, polyFragments []group.Scalar) (*Phase2Output, error) {
+	// Validate no zero polynomial fragments.
+	for _, frag := range polyFragments {
+		if dkls23.IsZero(frag) {
+			return nil, errors.New("zero polynomial fragment received")
+		}
+	}
+
 	polyPoint, proofCommitment, err := Step3(data.PartyIndex, data.SessionID, polyFragments)
 	if err != nil {
 		return nil, err
@@ -215,6 +236,16 @@ func Phase3(data *SessionData, zeroKept map[uint8]*Phase2to3ZeroKeep) (*Phase3Ou
 		})
 	}
 
+	// Zero consumed Phase2 seed originals (defense-in-depth; seeds are copied
+	// by value into Phase3to4ZeroKeep/Phase3to4ZeroTransmit above).
+	// Salt is not zeroed because the transmitted slice shares the underlying
+	// array and is still needed for commitment verification in Phase4.
+	for _, kept := range zeroKept {
+		for i := range kept.Seed {
+			kept.Seed[i] = 0
+		}
+	}
+
 	// Multiplication initialization
 	mulKeep := make(map[uint8]*Phase3to4MulKeep)
 	mulTransmit := make([]*Phase3to4MulTransmit, 0, data.Parameters.ShareCount-1)
@@ -238,6 +269,12 @@ func Phase3(data *SessionData, zeroKept map[uint8]*Phase2to3ZeroKeep) (*Phase3Ou
 			return nil, err
 		}
 
+		// VecR is stored by reference.  This is safe because:
+		// (1) InitExtSenderPhase2 (called from InitSenderPhase2 in Phase4)
+		//     invokes Phase2Batch which zeroes vecR scalars via defer, so the
+		//     slice contents are consumed exactly once.
+		// (2) Phase4 cleanup also zeroes VecR entries (defense-in-depth).
+		// No deep copy is needed -- unlike Nonce, VecR is not transmitted.
 		mulKeep[i] = &Phase3to4MulKeep{
 			OTSender:    otSender,
 			Nonce:       nonce,
@@ -246,11 +283,16 @@ func Phase3(data *SessionData, zeroKept map[uint8]*Phase2to3ZeroKeep) (*Phase3Ou
 			VecR:        vecR,
 		}
 
+		// Copy nonce so that zeroing MulKeep.Nonce in Phase4 does not
+		// corrupt the transmitted nonce used by the counterparty.
+		nonceCopy := dkls23.NewScalar().Set(nonce)
+		// NOTE: The OT receiver seed is transmitted in the clear. This protocol
+		// assumes an authenticated and confidential transport channel (e.g., TLS).
 		mulTransmit = append(mulTransmit, &Phase3to4MulTransmit{
 			Sender:    data.PartyIndex,
 			Receiver:  i,
 			DLogProof: dlogProof,
-			Nonce:     nonce,
+			Nonce:     nonceCopy,
 			EncProofs: encProofs,
 			Seed:      otReceiver.GetSeed(),
 		})
@@ -303,7 +345,7 @@ func Phase4(data *SessionData, input *Phase4Input) (*sign.Party, error) {
 		}
 
 		if received2 == nil || received3 == nil {
-			continue
+			return nil, fmt.Errorf("missing zero-share messages from party %d", targetParty)
 		}
 
 		// Verify commitment
@@ -330,7 +372,7 @@ func Phase4(data *SessionData, input *Phase4Input) (*sign.Party, error) {
 			}
 		}
 		if received == nil {
-			continue
+			return nil, fmt.Errorf("missing multiplication message from party %d", targetParty)
 		}
 
 		// Initialize receiver (we = receiver, target = sender)
@@ -362,6 +404,32 @@ func Phase4(data *SessionData, input *Phase4Input) (*sign.Party, error) {
 
 		mulReceivers[targetParty] = mulReceiver
 		mulSenders[targetParty] = mulSender
+	}
+
+	// Zero consumed DKG intermediates.
+	for _, zk := range input.ZeroKept {
+		for i := range zk.Seed {
+			zk.Seed[i] = 0
+		}
+	}
+	for _, mk := range input.MulKept {
+		if mk.OTSender != nil {
+			mk.OTSender.Zero()
+		}
+		if mk.OTReceiver != nil {
+			mk.OTReceiver.Zero()
+		}
+		for i := range mk.Correlation {
+			mk.Correlation[i] = false
+		}
+		for _, r := range mk.VecR {
+			if r != nil {
+				r.Zero()
+			}
+		}
+		if mk.Nonce != nil {
+			mk.Nonce.Zero()
+		}
 	}
 
 	party := &sign.Party{

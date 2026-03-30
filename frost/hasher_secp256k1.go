@@ -3,6 +3,7 @@ package frost
 import (
 	"crypto/sha256"
 	"math/big"
+	"runtime"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -58,6 +59,14 @@ func (h *Secp256k1Hasher) hashToScalar(g group.Group, tag string, data ...[]byte
 
 	// Reduce via big.Int to handle secp256k1 SetBytes 32-byte limit.
 	n := new(big.Int).SetBytes(expanded)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+		n.SetInt64(0)
+	}()
 	order := new(big.Int).SetBytes(g.Order())
 	n.Mod(n, order)
 

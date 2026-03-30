@@ -19,7 +19,7 @@ func runDKG2of2(t *testing.T) (party1, party2 *sign.Party, sessionData1, session
 	t.Helper()
 
 	params := Parameters{Threshold: 2, ShareCount: 2}
-	sessionID := []byte("test-refresh-dkg-2of2")
+	sessionID := []byte("test-refresh-dkg-2of2-pad")
 
 	sessionData1 = &SessionData{Parameters: params, PartyIndex: 1, SessionID: sessionID}
 	sessionData2 = &SessionData{Parameters: params, PartyIndex: 2, SessionID: sessionID}
@@ -101,7 +101,7 @@ func runDKG2of3(t *testing.T) (parties []*sign.Party, sessionDatas []*SessionDat
 	t.Helper()
 
 	params := Parameters{Threshold: 2, ShareCount: 3}
-	sessionID := []byte("test-refresh-dkg-2of3")
+	sessionID := []byte("test-refresh-dkg-2of3-pad")
 
 	sessionDatas = make([]*SessionData, 3)
 	for i := range 3 {
@@ -570,7 +570,7 @@ func TestDKLs23RefreshPhase1Validation(t *testing.T) {
 			data: &SessionData{
 				Parameters: Parameters{Threshold: 1, ShareCount: 2},
 				PartyIndex: 1,
-				SessionID:  []byte("bad-session"),
+				SessionID:  []byte("bad-session-padded"),
 			},
 		},
 		{
@@ -578,7 +578,7 @@ func TestDKLs23RefreshPhase1Validation(t *testing.T) {
 			data: &SessionData{
 				Parameters: Parameters{Threshold: 3, ShareCount: 2},
 				PartyIndex: 1,
-				SessionID:  []byte("bad-session"),
+				SessionID:  []byte("bad-session-padded"),
 			},
 		},
 		{
@@ -586,7 +586,7 @@ func TestDKLs23RefreshPhase1Validation(t *testing.T) {
 			data: &SessionData{
 				Parameters: Parameters{Threshold: 2, ShareCount: 3},
 				PartyIndex: 0,
-				SessionID:  []byte("bad-session"),
+				SessionID:  []byte("bad-session-padded"),
 			},
 		},
 		{
@@ -594,7 +594,7 @@ func TestDKLs23RefreshPhase1Validation(t *testing.T) {
 			data: &SessionData{
 				Parameters: Parameters{Threshold: 2, ShareCount: 3},
 				PartyIndex: 4,
-				SessionID:  []byte("bad-session"),
+				SessionID:  []byte("bad-session-padded"),
 			},
 		},
 	}
@@ -614,7 +614,7 @@ func TestDKLs23RefreshPhase2WrongDeltaCount(t *testing.T) {
 	// No OT operations needed for RefreshPhase1 or the error path.
 
 	params := Parameters{Threshold: 2, ShareCount: 3}
-	sessionID := []byte("test-delta-count")
+	sessionID := []byte("test-delta-count-pad")
 	data := &SessionData{Parameters: params, PartyIndex: 1, SessionID: sessionID}
 
 	rOut, err := RefreshPhase1(data)
@@ -686,7 +686,7 @@ func TestDKLs23RefreshPhase2WrongDeltaCount(t *testing.T) {
 func TestDKLs23RefreshFeldmanVSSFailure(t *testing.T) {
 	// No OT operations needed for this test.
 	params := Parameters{Threshold: 2, ShareCount: 2}
-	sessionID := []byte("test-refresh-vss")
+	sessionID := []byte("test-refresh-vss-pad")
 	data1 := &SessionData{Parameters: params, PartyIndex: 1, SessionID: sessionID}
 	data2 := &SessionData{Parameters: params, PartyIndex: 2, SessionID: sessionID}
 

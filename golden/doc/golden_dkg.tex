@@ -1,0 +1,2740 @@
+\documentclass[11pt,a4paper]{article}
+
+% ── Packages ──────────────────────────────────────────────────────────────────
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{mathtools}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{hyperref}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning,calc}
+
+% ── Theorem environments ─────────────────────────────────────────────────────
+\newtheorem{definition}{Definition}[section]
+\newtheorem{theorem}{Theorem}[section]
+\newtheorem{lemma}[theorem]{Lemma}
+\newtheorem{proposition}[theorem]{Proposition}
+\newtheorem{corollary}[theorem]{Corollary}
+\newtheorem{remark}{Remark}[section]
+
+% ── Custom commands ───────────────────────────────────────────────────────────
+\newcommand{\F}{\mathbb{F}}
+\newcommand{\Z}{\mathbb{Z}}
+\newcommand{\G}{\mathbb{G}}
+\newcommand{\Gbj}{\G_{\mathrm{BJJ}}}
+\newcommand{\Gbn}{\G_{\mathrm{BN}}}
+\newcommand{\Fr}{\F_r}
+\newcommand{\Fl}{\Z_\ell}
+\newcommand{\Fp}{\F_p}
+\newcommand{\order}{\mathrm{ord}}
+\newcommand{\cofactor}{h}
+\newcommand{\gen}{G}
+\newcommand{\genbjj}{G_{\mathrm{BJJ}}}
+\newcommand{\genbn}{G_{\mathrm{BN}}}
+\newcommand{\sk}{\mathsf{sk}}
+\newcommand{\pk}{\mathsf{pk}}
+\newcommand{\PK}{\mathsf{PK}}
+\newcommand{\SK}{\mathsf{SK}}
+\newcommand{\id}{\mathsf{id}}
+\newcommand{\sid}{\mathsf{sid}}
+\newcommand{\pad}{\mathsf{pad}}
+\newcommand{\hash}{\mathcal{H}}
+\newcommand{\hashcurve}{\mathsf{H}}
+\newcommand{\poly}{f}
+\newcommand{\Poly}{\mathsf{Poly}}
+\newcommand{\VSS}{\mathsf{VSS}}
+\newcommand{\Commit}{\mathsf{Commit}}
+\newcommand{\Verify}{\mathsf{Verify}}
+\newcommand{\Prove}{\mathsf{Prove}}
+\newcommand{\Extract}{\mathsf{Extract}_X}
+\newcommand{\DH}{\mathsf{DH}}
+\newcommand{\LHL}{\mathsf{LHL}}
+\newcommand{\dhx}{\chi}
+\newcommand{\eVRF}{\mathsf{eVRF}}
+\newcommand{\PLONK}{\mathsf{PLONK}}
+\newcommand{\FROST}{\mathsf{FROST}}
+\newcommand{\bigO}{\mathcal{O}}
+\newcommand{\negl}{\mathsf{negl}}
+\newcommand{\getsr}{\xleftarrow{\$}}
+\DeclareMathOperator{\ScalarMul}{ScalarMul}
+
+% ── Title ─────────────────────────────────────────────────────────────────────
+\title{%
+  \textbf{GOLDEN Non-Interactive DKG}\\[0.3em]
+  \large Adaptation to BN254/Baby~Jubjub with\\
+  gnark PLONK eVRF Proofs and FROST Integration
+}
+\author{Fy Cryptographic Library --- Technical Specification}
+\date{February 2026}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+We present the design and implementation of a non-interactive distributed key
+generation (DKG) protocol based on the GOLDEN construction (IACR~2025/1924),
+adapted from BLS12-381 to the BN254/Baby~Jubjub curve pairing. The protocol
+operates across two elliptic curve groups simultaneously: Baby~Jubjub
+(BJJ) for Diffie--Hellman key agreement and identity proofs, and BN254~G1 for
+polynomial secret sharing, Feldman VSS commitments, and threshold key
+generation. An evaluatable Verifiable Random Function (eVRF), instantiated
+via a gnark PLONK zero-knowledge proof system, enables non-interactive
+encrypted share distribution without secure channels. The resulting key shares
+are directly compatible with the FROST threshold Schnorr signature scheme
+(RFC~9591~\cite{rfc9591}). This document provides a complete mathematical specification of
+every component: the algebraic setting, cross-field conversions, hash-to-curve
+construction, Shamir secret sharing, Feldman VSS, Schnorr identity proofs, the
+eVRF pad derivation with Leftover Hash Lemma combination, the PLONK arithmetic
+circuit, the full DKG protocol, and the FROST signing integration.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Introduction}
+\label{sec:intro}
+
+Distributed key generation (DKG) is a foundational primitive for threshold
+cryptography: $n$~participants jointly generate a shared secret key such that
+any subset of $t$~or more can reconstruct it (or use it for signing), while
+any~$t-1$ or fewer learn nothing about the secret. Traditional DKG protocols
+require multiple interactive rounds and secure channels between participants.
+
+The GOLDEN protocol~\cite{golden2025} achieves \emph{non-interactive} DKG by
+replacing secure channels with an eVRF-based encryption scheme. Each dealer
+encrypts shares for recipients using pads derived from Diffie--Hellman shared
+secrets, proved correct via zero-knowledge proofs. The entire dealing is
+broadcast in a single message.
+
+This document describes our adaptation of GOLDEN from BLS12-381 to the
+BN254/Baby~Jubjub curve pairing. The adaptation exploits a crucial algebraic
+property: the base field of Baby~Jubjub \emph{coincides} with the scalar field
+of BN254, enabling zero-cost x-coordinate extraction for the eVRF
+construction. The output key shares integrate directly with the FROST threshold
+Schnorr signature scheme.
+
+\subsection{Notation}
+
+Throughout this document, we use the following conventions:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Meaning} \\
+\midrule
+$\getsr$ & Sampled uniformly at random \\
+$[s]P$ & Scalar multiplication of point $P$ by scalar $s$ \\
+$\mathcal{O}$ & The identity point (point at infinity) \\
+$n$ & Total number of participants \\
+$t$ & Signing threshold ($t \ge 2$) \\
+$\sid$ & Session identifier ($\{0,1\}^{256}$) \\
+$i \in [1, n]$ & Participant index (node ID) \\
+$\|$ & Concatenation \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Security Model}
+\label{sec:secmodel-intro}
+
+The GOLDEN DKG is analyzed in the following security model:
+
+\begin{itemize}[nosep]
+  \item \textbf{Static adversary.} A computationally bounded adversary corrupts
+    up to $t - 1$ participants \emph{before} the protocol begins. Corrupted
+    parties may deviate arbitrarily from the protocol (Byzantine faults). The
+    adversary is \emph{rushing}: it may wait to see all honest messages before
+    submitting its own.
+
+  \item \textbf{No adaptive corruption.} The adversary's corruption set is fixed
+    before Round~0. Adaptive corruption (choosing whom to corrupt based on
+    protocol messages) is \emph{not} considered.
+
+  \item \textbf{Authenticated broadcast with eventual delivery.} All Round0Msg
+    messages are delivered authentically and eventually to all participants. The
+    Schnorr identity proof (Section~\ref{sec:schnorr}) binds each dealing to
+    the dealer's BJJ public key; transport-layer integrity is assumed.
+
+  \item \textbf{Computational assumptions:}
+    \begin{itemize}[nosep]
+      \item Decisional Diffie--Hellman (DDH) on $\Gbj$ (Baby Jubjub).
+      \item Discrete Logarithm (DL) on $\Gbn$ (BN254 G1).
+      \item PLONK knowledge soundness (under the algebraic group model and
+        random oracle model, as per~\cite{gabizon2019}).
+    \end{itemize}
+\end{itemize}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Algebraic Setting}
+\label{sec:algebra}
+
+The protocol operates over two distinct elliptic curve groups simultaneously.
+The interplay between their field structures is the key enabler for the eVRF
+construction.
+
+% ── 2.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Baby Jubjub ($\Gbj$)}
+\label{sec:bjj}
+
+Baby Jubjub (BJJ) is a twisted Edwards curve defined over $\Fr$, the BN254
+scalar field (i.e., the BJJ base field \emph{is} $\Fr$; see
+Section~\ref{sec:fieldrel}). The curve equation is:
+\begin{equation}
+  \label{eq:bjj}
+  a x^2 + y^2 = 1 + d\, x^2 y^2, \qquad a = -1,
+\end{equation}
+where $d = 12181644023421730124874158521699555681764249180949974110617291017600649128846$ is the curve parameter from gnark-crypto (see~\cite{lefkovits2017}).
+
+\begin{remark}
+  Setting $a = -1$ and rearranging~\eqref{eq:bjj} yields
+  $-x^2 + y^2 = 1 + d\,x^2 y^2$, hence
+  $y^2(1 - d\,x^2) = 1 + x^2$, which gives the $y^2$ formula used
+  in hash-to-curve (equation~\eqref{eq:ysquared}).
+\end{remark}
+
+The full curve group has
+order $8\ell$, where:
+\begin{align}
+  \ell &= 2736030358979909402780800718157159386076813972158567259200215660948447373041
+  \label{eq:ell}
+\end{align}
+is the prime subgroup order ($\approx 2^{251}$ bits;
+$\ell = \texttt{0x060C89CE5C263405370A08B6D0302B0BAB3EEDB83920EE0A677297DC392126F1}$),
+and the cofactor is $\cofactor = 8$. We work exclusively in the prime-order
+subgroup of order $\ell$.
+
+\begin{itemize}[nosep]
+  \item \textbf{Scalar field:} $\Fl$ (integers modulo $\ell$, $\approx 2^{251}$ bits).
+  \item \textbf{Base field:} $\Fr$ (the BN254 scalar field, integers modulo $r$, $\approx 2^{254}$ bits).
+  \item \textbf{Generator:} $\genbjj$ is the standard BJJ base point from gnark-crypto.
+\end{itemize}
+
+\noindent
+\textbf{Note on naming:} Some references denote the BJJ base field as ``$\Fp$''
+because Baby Jubjub is defined over a prime field. In this document, we
+consistently write $\Fr$ for this field because it is the BN254 scalar field;
+see~\eqref{eq:fieldrel}. The macro $\Fp$ is retained only for the BN254 base
+field $\Fp'$.
+
+% ── 2.2 ──────────────────────────────────────────────────────────────────────
+\subsection{BN254 G1 ($\Gbn$)}
+\label{sec:bn254}
+
+BN254 G1 (also known as alt\_bn128) is a prime-order elliptic curve group
+defined over the BN254 base field $\Fp'$. It has prime order:
+\begin{align}
+  r &= 21888242871839275222246405745257275088548364400416034343698204186575808495617
+  \label{eq:r}
+\end{align}
+($r = \texttt{0x30644E72E131A029B85045B68181585D2833E84879B9709143E1F593F0000001}$),
+with cofactor $1$ (every point except the identity is a generator of the full
+group).
+
+\begin{itemize}[nosep]
+  \item \textbf{Scalar field:} $\Fr$ (integers modulo $r$, $\approx 2^{254}$ bits).
+  \item \textbf{Base field:} $\Fp'$ (the BN254 base field, $\approx 2^{254}$ bits, distinct from $\Fr$).
+  \item \textbf{Generator:} $\genbn$ is the standard BN254 G1 generator.
+\end{itemize}
+
+\begin{remark}[Concrete Security Level]
+  \label{rem:bn254-security}
+  BN254 provides approximately $100$--$110$ bits of security against the best
+  known discrete-logarithm attacks (tower NFS~\cite{kb2016}), \emph{not} the
+  128-bit level commonly assumed for generic prime-order groups. This is
+  sufficient for many deployed systems (Ethereum, Zcash Sapling), but
+  applications requiring $\ge 128$-bit security should migrate to BLS12-381 or
+  BN382. The GOLDEN DKG construction is curve-agnostic via the
+  \texttt{CurveSuite} abstraction and can be instantiated with higher-security
+  pairings without protocol changes.
+\end{remark}
+
+% ── 2.3 ──────────────────────────────────────────────────────────────────────
+\subsection{The Critical Field Relationship}
+\label{sec:fieldrel}
+
+The central algebraic property exploited by this construction is:
+
+\begin{equation}
+  \boxed{\text{BJJ base field} = \Fr = \text{BN254 scalar field}}
+  \label{eq:fieldrel}
+\end{equation}
+
+This has three immediate consequences:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Native x-coordinate extraction.} The coordinates $(x, y)$ of
+        any BJJ point are elements of $\Fr$. Extracting the x-coordinate of a
+        BJJ point yields an $\Fr$ element with no field conversion or reduction
+        required.
+
+  \item \textbf{Injection $\Fl \hookrightarrow \Fr$.} Since $\ell < r$, every
+        element of $\Fl$ is a valid element of $\Fr$. The map
+        $\iota: \Fl \to \Fr$ defined by $\iota(s) = s$ (interpreting the
+        integer representative in $[0, \ell)$ as an element of $\Fr$) is an
+        injection.
+
+  \item \textbf{Reduction $\Fr \twoheadrightarrow \Fl$.} The map
+        $\pi: \Fr \to \Fl$ defined by $\pi(s) = s \bmod \ell$ is a surjection.
+        For any point $H$ of order $\ell$ and any $s \in \Fr$:
+        \begin{equation}
+          [s]H = [s \bmod \ell]H
+          \label{eq:reduction}
+        \end{equation}
+        This is because $[\ell]H = \mathcal{O}$, so the scalar multiplication
+        depends only on $s \bmod \ell$.
+\end{enumerate}
+
+\begin{remark}
+  The field identity~\eqref{eq:fieldrel} is the reason BJJ was chosen as the
+  ``inner'' curve for the eVRF: it enables the PLONK circuit
+  (Section~\ref{sec:circuit}) to perform BJJ operations natively (without
+  emulated arithmetic), dramatically reducing circuit size.
+\end{remark}
+
+% ── 2.4 ──────────────────────────────────────────────────────────────────────
+\subsection{Field Conversion Functions}
+\label{sec:fieldconv}
+
+We define three conversion functions used throughout the protocol:
+
+\begin{definition}[X-Coordinate Extraction]
+  \label{def:extractx}
+  $\Extract: \Gbj \to \Fr$ maps a BJJ point $P = (x, y)$ to its x-coordinate
+  $x \in \Fr$. Since BJJ coordinates are natively in $\Fr$
+  (Section~\ref{sec:fieldrel}), this is an exact injection---no modular
+  reduction is performed.
+\end{definition}
+
+\begin{definition}[BJJ-to-Fr Injection]
+  \label{def:bjjtofr}
+  $\iota: \Fl \to \Fr$ interprets a BJJ scalar as a BN254 scalar. Since
+  $\ell < r$, this is a lossless injection: every $\Fl$ element has a unique
+  representative in $[0, \ell) \subset [0, r)$.
+\end{definition}
+
+\begin{definition}[Fr-to-BJJ Reduction]
+  \label{def:frtobjj}
+  $\pi: \Fr \to \Fl$ reduces a BN254 scalar modulo $\ell$:
+  $\pi(s) = s \bmod \ell$. This is lossy for values $s \ge \ell$, but
+  algebraically equivalent for subgroup operations by~\eqref{eq:reduction}.
+\end{definition}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Cryptographic Primitives}
+\label{sec:primitives}
+
+% ── 3.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Hash Functions}
+\label{sec:hash}
+
+\subsubsection{Hash-to-Scalar}
+
+We define two hash-to-scalar functions, one for each scalar field:
+
+\begin{definition}[Hash-to-Scalar]
+  \label{def:hashtoscalar}
+  For a field $\F_q$ (either $\Fr$ or $\Fl$), the function
+  $\hash_q: \{0,1\}^* \to \F_q$
+  is constructed via counter-based SHA-256 expansion.
+
+  \medskip\noindent
+  \textbf{Input encoding.} Each Group implementation prepends a
+  \emph{group-level domain prefix} $\mathsf{gdom}$ as raw bytes
+  (e.g., \texttt{"BN254G1"} for $\Fr$, \texttt{"CircomBJJ"} for $\Fl$).
+  Each data element $d_i$ (including any protocol-level domain separator
+  passed as $d_0$) is a byte string prefixed with its length as a 4-byte
+  big-endian unsigned integer.
+  Point arguments are encoded as their canonical compressed byte representation
+  before length-prefixing.
+
+  \medskip\noindent
+  \textbf{Expansion.}
+  \begin{align}
+    h_0 &= \mathrm{SHA\text{-}256}(\mathsf{gdom} \,\|\, \mathrm{len}(d_0) \,\|\, d_0 \,\|\, \cdots \,\|\, \texttt{0x00}) \\
+    h_1 &= \mathrm{SHA\text{-}256}(\mathsf{gdom} \,\|\, \mathrm{len}(d_0) \,\|\, d_0 \,\|\, \cdots \,\|\, \texttt{0x01}) \\
+    s &= (h_0 \,\|\, h_1) \bmod q
+  \end{align}
+  The 64-byte expanded value is interpreted as a big-endian integer and reduced
+  modulo $q$. The statistical bias is at most $2^{-128}$ for any $q < 2^{256}$.
+\end{definition}
+
+\subsubsection{Hash-to-Curve (Try-and-Increment)}
+\label{sec:hashtocurve}
+
+Two independent hash-to-curve functions $\hashcurve_1, \hashcurve_2$ map
+session data to BJJ subgroup points.
+
+\begin{definition}[Hash-to-Curve]
+  \label{def:hashtocurve}
+  For domain $\mathsf{dom} \in \{\texttt{"golden-evrf-h1"}, \texttt{"golden-evrf-h2"}\}$
+  and input data $(d_0, d_1, \ldots)$:
+  \begin{enumerate}[nosep]
+    \item For $\mathsf{ctr} = 0, 1, \ldots, 255$:
+    \begin{enumerate}[nosep]
+      \item Compute
+        $\mathsf{digest} = \mathrm{SHA\text{-}256}\bigl(\mathsf{dom} \,\|\, \mathrm{len}(d_0) \,\|\, d_0 \,\|\, \cdots \,\|\, \mathsf{ctr}\bigr)$.
+      \item Set $x = \mathsf{digest} \bmod r$ (interpret as an element of $\Fr$,
+            which is also the BJJ base field per~\eqref{eq:fieldrel}).
+      \item Solve the twisted Edwards equation~\eqref{eq:bjj} for $y$:
+        \begin{equation}
+          y^2 = \frac{1 + x^2}{1 - d \cdot x^2}
+          \label{eq:ysquared}
+        \end{equation}
+      \item If the denominator $1 - d \cdot x^2 = 0$, continue.
+      \item If $y^2$ is not a quadratic residue in $\Fr$ (Legendre symbol $\ne 1$),
+            continue.
+      \item Compute $y = \sqrt{y^2}$; select the \emph{lexicographically smallest}
+            root by comparing the big-endian byte representations of $y$ and $-y$.
+      \item Verify $(x, y)$ is on the curve.
+      \item \textbf{Cofactor clearing:} $P_8 = [8](x, y)$.
+      \item If $P_8 = \mathcal{O}$, continue.
+      \item Verify subgroup membership: $[\ell]P_8 = \mathcal{O}$.
+      \item Return $P_8$.
+    \end{enumerate}
+    \item If all 256 attempts fail, abort with error.
+  \end{enumerate}
+\end{definition}
+
+\begin{remark}[Timing Side-Channel]
+  Try-and-increment is \emph{not} constant-time: the number of iterations leaks
+  through timing. This is acceptable because the inputs
+  $\mathsf{sessData} = (\sid, \mathsf{randomMsg})$ become public once the
+  dealing is broadcast (the \texttt{randomMsg} is included in the
+  \texttt{Round0Msg}). During dealing \emph{construction}, the
+  \texttt{randomMsg} is known only to the dealer, so a local
+  timing side-channel is harmless (the dealer already knows its own secret).
+  Verifiers call $\hashcurve$ only after receiving the broadcast, at which
+  point all inputs are public. Secret-dependent inputs must never be passed
+  to $\hashcurve$.
+\end{remark}
+
+\begin{remark}
+  The domain separation $\texttt{"golden-evrf-h1"} \ne \texttt{"golden-evrf-h2"}$
+  ensures $\hashcurve_1$ and $\hashcurve_2$ produce independent outputs for
+  identical inputs, which is required for the Leftover Hash Lemma application
+  (Section~\ref{sec:lhl}).
+\end{remark}
+
+% ── 3.2 ──────────────────────────────────────────────────────────────────────
+\subsection{Shamir Secret Sharing}
+\label{sec:shamir}
+
+\begin{definition}[Random Polynomial]
+  \label{def:polynomial}
+  Given a group $\G$ with scalar field $\F_q$, a secret
+  $\omega \in \F_q$, and degree $d$, define the random polynomial:
+  \begin{equation}
+    f(x) = \omega + a_1 x + a_2 x^2 + \cdots + a_d x^d, \qquad a_i \getsr \F_q
+  \end{equation}
+  The constant term $f(0) = \omega$ is the shared secret.
+\end{definition}
+
+\begin{definition}[Share Generation]
+  \label{def:shares}
+  For $n$ participants with IDs $\{1, 2, \ldots, n\}$, the share of participant
+  $i$ is:
+  \begin{equation}
+    s_i = f(i) \in \F_q
+  \end{equation}
+  Evaluation uses Horner's method: starting from $\mathsf{result} = a_d$, iterate
+  $\mathsf{result} \leftarrow \mathsf{result} \cdot x + a_{i}$ for
+  $i = d-1, \ldots, 0$.
+\end{definition}
+
+\begin{theorem}[Lagrange Reconstruction]
+  \label{thm:lagrange}
+  Given any $t = d + 1$ shares $\{(i_j, s_{i_j})\}_{j=1}^{t}$, the secret can
+  be reconstructed as:
+  \begin{equation}
+    \omega = f(0) = \sum_{j=1}^{t} s_{i_j} \cdot \lambda_{i_j}
+    \label{eq:lagrange}
+  \end{equation}
+  where the Lagrange coefficients are:
+  \begin{equation}
+    \lambda_{i_j} = \prod_{\substack{k=1 \\ k \ne j}}^{t}
+      \frac{i_k}{i_k - i_j}
+    \label{eq:lagrange-coeff}
+  \end{equation}
+  Any $t-1$ or fewer shares reveal no information about $\omega$
+  (information-theoretic security).
+\end{theorem}
+
+\begin{remark}
+  The equivalent formulation $\lambda_{i_j} = \prod_{k \ne j} \frac{i_k}{i_k - i_j}$
+  is often used in implementations; the two forms are algebraically equal.
+\end{remark}
+
+% ── 3.3 ──────────────────────────────────────────────────────────────────────
+\subsection{Feldman Verifiable Secret Sharing}
+\label{sec:vss}
+
+Feldman VSS~\cite{feldman1987} extends Shamir sharing with public
+commitments that allow verification of share correctness without
+revealing the shares.
+
+\begin{definition}[VSS Commitment]
+  \label{def:vsscommit}
+  Given a polynomial $f(x) = \sum_{k=0}^{t-1} a_k x^k$ over $\Fr$ and a
+  generator $\genbn \in \Gbn$, the VSS commitment vector is:
+  \begin{equation}
+    \mathbf{A} = (A_0, A_1, \ldots, A_{t-1}), \qquad A_k = [a_k]\genbn
+  \end{equation}
+  In particular, $A_0 = [\omega]\genbn$ is the commitment to the secret.
+\end{definition}
+
+\begin{definition}[Expected Share Commitment]
+  \label{def:expectedshare}
+  The expected commitment to the share $f(i)$ is:
+  \begin{equation}
+    \VSS(i) = \sum_{k=0}^{t-1} [i^k] A_k = [f(i)] \genbn
+    \label{eq:vss-verify}
+  \end{equation}
+  This follows from the homomorphism of scalar multiplication:
+  $\sum [i^k] [a_k] \genbn = [\sum a_k \cdot i^k] \genbn = [f(i)] \genbn$.
+\end{definition}
+
+\begin{remark}
+  In this implementation, the polynomial $f$ is defined over $\Fr$ (the BN254
+  scalar field) and commitments are computed in $\Gbn$. This ensures
+  consistency: the Shamir shares, ciphertext arithmetic, and VSS verification
+  all operate in the same field $\Fr$.
+\end{remark}
+
+% ── 3.4 ──────────────────────────────────────────────────────────────────────
+\subsection{Schnorr Proof of Knowledge (Identity Proof)}
+\label{sec:schnorr}
+
+Each dealer proves knowledge of their BJJ secret key, bound to the session ID,
+to prevent identity impersonation and cross-session replay.
+
+\begin{definition}[Session-Bound Schnorr PoK]
+  \label{def:schnorr}
+  For a prover with secret key $\sk \in \Fl$ and public key
+  $\pk = [\sk]\genbjj$, bound to session $\sid$:
+
+  \medskip
+  \textbf{Prove}$(\sk, \pk, \sid)$:
+  \begin{enumerate}[nosep]
+    \item Sample $\nu \getsr \Fl$ \hfill (nonce)
+    \item $R \leftarrow [\nu]\genbjj$ \hfill (commitment)
+    \item $c \leftarrow \hash_\ell\bigl(\texttt{"golden-pki-pok"} \,\|\, \sid \,\|\, \pk \,\|\, R\bigr)$
+          \hfill (challenge)
+    \item $s \leftarrow \nu - c \cdot \sk \pmod{\ell}$ \hfill (response)
+    \item Securely erase $\nu$
+    \item Return $\pi = (R, c, s)$
+  \end{enumerate}
+
+  \medskip
+  \textbf{Verify}$(\pk, \sid, \pi = (R, c, s))$:
+  \begin{enumerate}[nosep]
+    \item $R' \leftarrow [s]\genbjj + [c]\pk$ \hfill (recompute commitment)
+    \item $c' \leftarrow \hash_\ell\bigl(\texttt{"golden-pki-pok"} \,\|\, \sid \,\|\, \pk \,\|\, R'\bigr)$
+    \item Accept if and only if $c' = c$
+  \end{enumerate}
+\end{definition}
+
+\begin{proposition}[Correctness]
+  If $\pi$ was honestly generated, then
+  $R' = [s]\genbjj + [c]\pk = [\nu - c\sk]\genbjj + [c \cdot \sk]\genbjj = [\nu]\genbjj = R$,
+  so $c' = c$.
+\end{proposition}
+
+\begin{remark}
+  This uses the \emph{subtraction} convention ($s = \nu - c \cdot \sk$), with
+  verification $R' = [s]G + [c]\pk$. The addition convention
+  ($s = \nu + c \cdot \sk$ with $R' = [s]G - [c]\pk$) is equivalent and
+  equally secure; the choice is purely a matter of implementation convention.
+\end{remark}
+
+% ── 3.5 ──────────────────────────────────────────────────────────────────────
+\subsection{Domain Separation}
+\label{sec:domains}
+
+All hash function invocations use distinct domain separators to prevent
+cross-protocol attacks:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lllp{4cm}@{}}
+\toprule
+\textbf{Domain String} & \textbf{Type} & \textbf{Function} & \textbf{Purpose} \\
+\midrule
+\texttt{"BN254G1"} & group-level & $\hash_r$ & Raw prefix for all BN254 hash-to-scalar \\
+\texttt{"CircomBJJ"} & group-level & $\hash_\ell$ & Raw prefix for all BJJ hash-to-scalar \\
+\texttt{"golden-evrf-h1"} & protocol & $\hashcurve_1$ & First hash-to-curve for eVRF (raw) \\
+\texttt{"golden-evrf-h2"} & protocol & $\hashcurve_2$ & Second hash-to-curve for eVRF (raw) \\
+\texttt{"golden-lhl-alpha"} & protocol & $\hash_r$ & LHL coefficient (length-prefixed $d_0$) \\
+\texttt{"golden-pki-pok"} & protocol & $\hash_\ell$ & Schnorr challenge (length-prefixed $d_0$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Group-level domain prefixes are written as raw bytes before the length-prefixed
+data elements (see Definition~\ref{def:hashtoscalar}). Hash-to-curve functions
+use their protocol domain string as a raw prefix directly (no length-prefixing).
+Protocol-level domain strings passed to $\hash_q$ are length-prefixed as $d_0$,
+preventing concatenation ambiguity attacks.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{The eVRF Construction}
+\label{sec:evrf}
+
+The eVRF (evaluatable Verifiable Random Function) is the core cryptographic
+mechanism enabling non-interactive share encryption. It derives a
+deterministic, symmetric encryption pad from a Diffie--Hellman shared secret
+over BJJ, combined with hash-to-curve evaluations via the Leftover Hash Lemma.
+
+% ── 4.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Diffie--Hellman on BJJ}
+\label{sec:dh}
+
+Given a dealer with secret key $\sk_d \in \Fl$ and a recipient with public key
+$\pk_j = [\sk_j]\genbjj$, the DH shared secret is:
+\begin{equation}
+  S_{d,j} = [\sk_d]\pk_j = [\sk_d \cdot \sk_j]\genbjj
+  \label{eq:dh}
+\end{equation}
+This is symmetric: $[\sk_d]\pk_j = [\sk_j]\pk_d$ (both equal
+$[\sk_d \sk_j]\genbjj$).
+
+\begin{remark}[DerivePad Scalar Type]
+  The $\mathsf{DerivePad}$ function accepts the dealer's secret key as a
+  $\Fl$ scalar (an inner-group scalar in $\Z_\ell$). This is important because
+  DH is performed on BJJ, where the group order is $\ell$, not $r$.
+\end{remark}
+
+\begin{remark}[Degenerate DH Check]
+  If $S_{d,j} = \mathcal{O}$ (the identity point), the pad would be $0$,
+  leaking the share in cleartext. The protocol aborts with
+  $\mathsf{ErrDegenerateDH}$ if this occurs. Under honestly generated keys
+  ($\sk \ne 0$), this probability is negligible.
+\end{remark}
+
+% ── 4.2 ──────────────────────────────────────────────────────────────────────
+\subsection{X-Coordinate Extraction and Field Conversion}
+\label{sec:xextract}
+
+Write $S_{d,j} = (S_x, S_y)$ in BJJ affine coordinates. Since BJJ coordinates
+are in $\Fr$ (Section~\ref{sec:fieldrel}):
+\begin{equation}
+  \dhx = \Extract(S_{d,j}) = S_x \in \Fr
+  \label{eq:extract}
+\end{equation}
+To perform scalar multiplication on BJJ subgroup points, we need a scalar in
+$\Fl$:
+\begin{equation}
+  \dhx_{\mathrm{BJJ}} = \pi(\dhx) = \dhx \bmod \ell \in \Fl
+  \label{eq:sbjj}
+\end{equation}
+By~\eqref{eq:reduction}, for any point $H$ of order $\ell$:
+$[\dhx]H = [\dhx_{\mathrm{BJJ}}]H$.
+
+% ── 4.3 ──────────────────────────────────────────────────────────────────────
+\subsection{VRF Evaluation}
+\label{sec:vrfeval}
+
+Let $\mathsf{sessData} = (\sid \,\|\, \mathsf{randomMsg}_d)$ be the session
+data, where $\mathsf{randomMsg}_d \getsr \{0,1\}^{256}$ is a fresh nonce per
+dealing (generated in Algorithm~\ref{alg:dealing}, line~7). Compute two
+independent hash-to-curve evaluations:
+\begin{align}
+  H_1 &= \hashcurve_1(\mathsf{sessData}) \in \Gbj  \label{eq:h1} \\
+  H_2 &= \hashcurve_2(\mathsf{sessData}) \in \Gbj  \label{eq:h2}
+\end{align}
+If $H_1 = \mathcal{O}$ or $H_2 = \mathcal{O}$, abort with
+$\mathsf{ErrIdentityPoint}$. (This guards against degenerate hash-to-curve
+outputs that would produce a zero pad regardless of the DH secret.)
+
+\begin{remark}[Negligible Probability of $\dhx = 0$]
+  \label{rem:chi-zero}
+  The DH x-coordinate $\dhx = \Extract([\sk_d]\pk_j) \in \Fr$ equals zero with
+  probability $1/r \approx 2^{-254}$, which is negligible. If $\dhx = 0$, then
+  $P_1 = P_2 = \mathcal{O}$ and the pad is identically zero regardless of
+  $\alpha$. The implementation does not explicitly check for this case; the
+  $H_i = \mathcal{O}$ check above catches a different failure mode (degenerate
+  hash-to-curve output). Since $\Pr[\dhx = 0] = \negl(\lambda)$, this is a
+  non-issue in practice.
+\end{remark}
+
+Then evaluate the VRF at these points:
+\begin{align}
+  P_1 &= [\dhx_{\mathrm{BJJ}}] H_1 \in \Gbj  \label{eq:p1} \\
+  P_2 &= [\dhx_{\mathrm{BJJ}}] H_2 \in \Gbj  \label{eq:p2}
+\end{align}
+
+% ── 4.4 ──────────────────────────────────────────────────────────────────────
+\subsection{Randomness Extraction via the Computational Leftover Hash Lemma}
+\label{sec:lhl}
+
+The x-coordinate extraction function $\Extract$ maps BJJ points to $\Fr$ elements,
+but it is not a random oracle---it is a deterministic algebraic 2-to-1 map
+(on a twisted Edwards curve, $P$ and $-P$ share the same $x$-coordinate).
+To extract computationally indistinguishable randomness from the DDH-hard
+DH output, we use the \emph{computational} variant of the Leftover Hash
+Lemma~\cite{dodis2008}.
+
+\medskip\noindent
+\textbf{Setup.} The classical (statistical) LHL~\cite{ill1989} requires the
+source to have high \emph{min-entropy}: $H_\infty(X) \ge \log|\Fr| + 2\lambda$,
+where $\lambda$ is the security parameter. Because $\Extract$ is 2-to-1,
+each x-coordinate $\Extract(P_i)$ has at most $\log\ell - 1$ bits of
+min-entropy (where $\ell$ is the BJJ subgroup order), which is
+comfortably above $\log r$ since $r < \ell$. However, under DDH the source
+is only \emph{computationally} hard, not information-theoretically uniform.
+We therefore invoke the computational LHL of Dodis et al.~\cite{dodis2008}:
+
+\begin{lemma}[Computational Leftover Hash Lemma {\cite[Lemma~2.4]{dodis2008}}]
+  \label{lem:clhl}
+  Let $\mathcal{H} = \{h_\alpha : \{0,1\}^n \to \{0,1\}^m\}_{\alpha \in \mathcal{K}}$
+  be a family of universal hash functions, and let $X$ be a random variable
+  over $\{0,1\}^n$ with \emph{computational} min-entropy
+  $H_\infty^{\mathrm{HILL}}(X) \ge m + 2\lambda$. Then
+  $(\alpha,\, h_\alpha(X))$ is computationally indistinguishable from
+  $(\alpha,\, U_m)$ where $U_m$ is uniform over $\{0,1\}^m$ and $\alpha
+  \getsr \mathcal{K}$.
+\end{lemma}
+
+\noindent\textbf{Application to GOLDEN.}
+We identify $X = (\Extract(P_1),\, \Extract(P_2)) \in \Fr^2$ and
+$h_\alpha(x_1, x_2) = x_1 + \alpha \cdot x_2 \in \Fr$ (an inner-product
+hash, which is a universal hash family over $\Fr$). Under DDH on $\Gbj$,
+the pair $(P_1, P_2) = ([\dhx]H_1,\, [\dhx]H_2)$ is computationally
+indistinguishable from two independent random subgroup points. Since
+$\Extract$ is 2-to-1, the joint source $X$ carries HILL min-entropy
+at least $2(\log\ell - 1) \ge 2 \times 252 > 254 + 2\lambda$ bits
+(for $\lambda = 100$, the BN254 security level; Remark~\ref{rem:bn254-security}).
+By Lemma~\ref{lem:clhl}, $(\alpha,\, \pad)$ is computationally
+indistinguishable from $(\alpha,\, U)$ where $U \getsr \Fr$.
+
+\begin{definition}[LHL Pad Derivation]
+  \label{def:pad}
+  Given a public session-level coefficient
+  \begin{equation}
+    \alpha = \hash_r\bigl(\texttt{"golden-lhl-alpha"} \,\|\, \sid\bigr) \in \Fr
+    \label{eq:alpha}
+  \end{equation}
+  the encryption pad is:
+  \begin{equation}
+    \pad = \Extract(P_1) + \alpha \cdot \Extract(P_2) \in \Fr
+    \label{eq:pad}
+  \end{equation}
+  Expanding: $\pad = P_1.x + \alpha \cdot P_2.x$, where all arithmetic is in
+  $\Fr$.
+\end{definition}
+
+\begin{remark}
+  The coefficient $\alpha$ is derived from the session ID alone (not
+  per-dealer or per-recipient). This is consistent with the GOLDEN protocol
+  specification, where $\alpha$ is a session-level parameter. Since different
+  dealer--recipient pairs have different DH secrets $S_{d,j}$, the pads are
+  already unique per pair. By Lemma~\ref{lem:clhl}, the pad is computationally
+  indistinguishable from a uniform $\Fr$ element given $\alpha$.
+\end{remark}
+
+% ── 4.5 ──────────────────────────────────────────────────────────────────────
+\subsection{Pad Commitment}
+\label{sec:padcommit}
+
+The dealer commits to the pad by computing:
+\begin{equation}
+  R_{d,j} = [\pad]\genbn \in \Gbn
+  \label{eq:rcommitment}
+\end{equation}
+This commitment serves two purposes:
+\begin{enumerate}[nosep]
+  \item It enables ciphertext consistency verification (Proposition~\ref{prop:ct-verify}).
+  \item It is a public input to the eVRF PLONK proof (Section~\ref{sec:circuit}).
+\end{enumerate}
+
+% ── 4.6 ──────────────────────────────────────────────────────────────────────
+\subsection{Share Encryption}
+\label{sec:encrypt}
+
+The dealer encrypts the share $s_j = f_d(j)$ for recipient $j$ as:
+\begin{equation}
+  z_{d,j} = \pad + s_j \in \Fr
+  \label{eq:ciphertext}
+\end{equation}
+The pair $(R_{d,j}, z_{d,j})$ forms the ciphertext. Decryption by recipient
+$j$ (who can re-derive $\pad$ via their own DH computation) recovers:
+\begin{equation}
+  s_j = z_{d,j} - \pad
+  \label{eq:decrypt}
+\end{equation}
+
+% ── 4.7 ──────────────────────────────────────────────────────────────────────
+\subsection{Symmetry Property}
+\label{sec:symmetry}
+
+The pad is symmetric between dealer $d$ and recipient $j$:
+\begin{equation}
+  \mathsf{DerivePad}(\sk_d, \pk_j, \mathsf{sessData}, \alpha)
+  = \mathsf{DerivePad}(\sk_j, \pk_d, \mathsf{sessData}, \alpha)
+  \label{eq:symmetry}
+\end{equation}
+This follows from the symmetry of Diffie--Hellman: $[\sk_d]\pk_j = [\sk_j]\pk_d$,
+which produces the same shared secret $S$ and thus the same $\dhx, \dhx_{\mathrm{BJJ}}, P_1, P_2, \pad$.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{eVRF Zero-Knowledge Proof}
+\label{sec:zkproof}
+
+The dealer must prove that the pad commitment $R_{d,j}$ was correctly derived
+from the DH shared secret, without revealing their secret key $\sk_d$. This is
+accomplished via a PLONK~\cite{gabizon2019} zero-knowledge proof over a
+gnark~\cite{gnark} arithmetic circuit.
+
+% ── 5.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Proof Statement}
+\label{sec:proofstatement}
+
+The eVRF proof establishes the following relation:
+
+\begin{equation}
+  \boxed{
+    \exists\, \sk \in \Fl : \quad
+    \begin{aligned}
+      &\pk_d = [\sk]\genbjj \\
+      &S = [\sk]\pk_j \\
+      &\pad = \Extract([\dhx]H_1) + \alpha \cdot \Extract([\dhx]H_2) \\
+      &R = [\pad]\genbn
+    \end{aligned}
+  }
+  \quad\text{where } \dhx = \Extract(S)
+  \label{eq:proof-relation}
+\end{equation}
+
+where $(\pk_d, \pk_j, H_1, H_2, \alpha, R)$ are public inputs and $\sk$ is
+the private witness.
+
+\begin{remark}[Witness Domain]
+  The secret key $\sk$ lives in $\Fl$ (the BJJ scalar field), but the PLONK
+  circuit is defined over $\Fr$. The circuit witness is $\iota(\sk) \in \Fr$
+  (the injected value; see Definition~\ref{def:bjjtofr}). Since $\ell < r$,
+  every $\Fl$ element has a unique representative in $\Fr$, and the BJJ
+  scalar multiplication gadget in gnark correctly handles $\Fr$ witnesses
+  operating on order-$\ell$ subgroup points (because $[\iota(\sk)]P = [\sk]P$
+  for any $P$ of order $\ell$, by~\eqref{eq:reduction}).
+\end{remark}
+
+% ── 5.2 ──────────────────────────────────────────────────────────────────────
+\subsection{Circuit Architecture}
+\label{sec:circuit}
+
+The PLONK arithmetic circuit is compiled over $\Fr$ (the BN254 scalar field),
+which is the native field of the gnark constraint system for BN254-based
+proofs. This choice has a crucial efficiency implication:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Operation} & \textbf{Curve} & \textbf{Cost} \\
+\midrule
+BJJ scalar mult. & $\Gbj$ & \emph{Native} (BJJ base field $=$ circuit field $\Fr$) \\
+BJJ point add. & $\Gbj$ & \emph{Native} \\
+BN254 G1 scalar mult. & $\Gbn$ & \emph{Emulated} (G1 base field $\Fp' \ne \Fr$) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsubsection{Public Inputs}
+
+The circuit has the following public input variables:
+\begin{align}
+  &\mathsf{DealerPK}_X, \mathsf{DealerPK}_Y \in \Fr
+    &&\text{(BJJ point, native)} \label{eq:pub-dealerpk} \\
+  &\mathsf{RecipientPK}_X, \mathsf{RecipientPK}_Y \in \Fr
+    &&\text{(BJJ point, native)} \label{eq:pub-recipientpk} \\
+  &H_{1,X}, H_{1,Y} \in \Fr
+    &&\text{(BJJ point, native)} \label{eq:pub-h1} \\
+  &H_{2,X}, H_{2,Y} \in \Fr
+    &&\text{(BJJ point, native)} \label{eq:pub-h2} \\
+  &\alpha \in \Fr
+    &&\text{(scalar, native)} \label{eq:pub-alpha} \\
+  &R_X, R_Y \in \Fp'
+    &&\text{(BN254 G1 point, emulated)} \label{eq:pub-r}
+\end{align}
+
+\subsubsection{Private Witness}
+
+\begin{equation}
+  \mathsf{DealerSK} = \iota(\sk) \in \Fr \qquad \text{(the BJJ secret key, injected into $\Fr$)}
+  \label{eq:priv-sk}
+\end{equation}
+
+\subsubsection{Constraint Steps}
+
+\begin{enumerate}
+  \item \textbf{Public Key Ownership} (BJJ, native):
+  \begin{align}
+    \mathsf{computedPK} &= [\mathsf{DealerSK}]\genbjj \\
+    \mathsf{AssertOnCurve}(\mathsf{DealerPK}) & \\
+    \mathsf{computedPK}.X &\stackrel{!}{=} \mathsf{DealerPK}_X \\
+    \mathsf{computedPK}.Y &\stackrel{!}{=} \mathsf{DealerPK}_Y
+  \end{align}
+
+  \item \textbf{DH Shared Secret} (BJJ, native):
+  \begin{align}
+    \mathsf{AssertOnCurve}(\mathsf{RecipientPK}) & \\
+    S &= [\mathsf{DealerSK}]\mathsf{RecipientPK}
+  \end{align}
+
+  \item \textbf{X-Coordinate Extraction} (native):
+  \begin{equation}
+    \dhx = S.X \in \Fr
+  \end{equation}
+
+  \begin{remark}[In-Circuit vs.\ Out-of-Circuit Equivalence]
+    Out-of-circuit, the code reduces $\dhx \bmod \ell$ before BJJ scalar
+    multiplication. In-circuit, $\dhx$ is used directly as a native $\Fr$
+    variable. These are algebraically equivalent because $H_1, H_2$ are in the
+    prime-order subgroup of order $\ell$, so $[\dhx]H = [\dhx \bmod \ell]H$.
+    The gnark twisted~Edwards \texttt{ScalarMul} gadget correctly handles
+    scalars in $\Fr$ operating on order-$\ell$ subgroup points.
+  \end{remark}
+
+  \item \textbf{Hash-to-Curve Multiplications} (BJJ, native):
+  \begin{align}
+    \mathsf{AssertOnCurve}(H_1),\; \mathsf{AssertOnCurve}(H_2) & \\
+    P_1 &= [\dhx] H_1 \\
+    P_2 &= [\dhx] H_2
+  \end{align}
+
+  \item \textbf{LHL Combination} (native $\Fr$ arithmetic):
+  \begin{equation}
+    \pad = P_1.X + \alpha \cdot P_2.X
+  \end{equation}
+
+  \item \textbf{BN254 G1 Commitment Verification} (emulated):
+  \begin{align}
+    \mathsf{padBits} &= \mathsf{ToBinary}(\pad, 254)
+      &&\text{(decompose native $\Fr$ to 254 bits)} \\
+    \mathsf{padScalar} &= \mathsf{FromBits}(\mathsf{padBits})
+      &&\text{(reconstruct as emulated $\Fr$)} \\
+    \mathsf{computedR} &= [\mathsf{padScalar}]\genbn
+      &&\text{(emulated BN254 G1 scalar mult.)} \\
+    \mathsf{computedR} &\stackrel{!}{=} R
+  \end{align}
+\end{enumerate}
+
+\begin{remark}[Bit Decomposition Bridge]
+  Step~6 is the most constraint-expensive part of the circuit. The pad $\pad$
+  is a native $\Fr$ variable, but the emulated BN254 G1 arithmetic
+  (\texttt{sw\_emulated}) expects an emulated $\Fr$ element with 4 limbs of 64
+  bits. The bridge is a 254-bit decomposition: the native value is split into
+  individual bits via range-check constraints, then reassembled as an emulated
+  element. This costs approximately $254$ range-check constraints plus the
+  emulated scalar multiplication ($\approx 10^4$ constraints).
+\end{remark}
+
+% ── 5.3 ──────────────────────────────────────────────────────────────────────
+\subsection{PLONK Proof System}
+\label{sec:plonk}
+
+The circuit is compiled and proved using the PLONK proof system with KZG
+polynomial commitments over BN254.
+
+\begin{itemize}[nosep]
+  \item \textbf{Circuit compilation:} The circuit is compiled once (lazily,
+    via \texttt{sync.Once}) into a constraint system (SCS format).
+  \item \textbf{Key generation:} Proving key $\mathsf{pk}$ and verifying key
+    $\mathsf{vk}$ are generated from the SCS and a KZG structured reference
+    string (SRS).
+  \item \textbf{Proof generation:}
+    $\mathsf{proof} \leftarrow \PLONK.\Prove(\mathsf{ccs}, \mathsf{pk}, \mathsf{witness})$.
+  \item \textbf{Verification:}
+    $\PLONK.\Verify(\mathsf{proof}, \mathsf{vk}, \mathsf{publicWitness})$.
+\end{itemize}
+
+\begin{remark}[SRS Security]
+  \label{rem:srs}
+  The production implementation uses the \textbf{Aztec Ignition ceremony SRS}~\cite{aztec-ignition},
+  a BN254 powers-of-tau structured reference string produced by a multi-party
+  computation with 176 participants. The ceremony transcript
+  (\texttt{transcript00.dat}, ${\sim}307$~MB, containing ${\sim}5 \times 10^6$
+  G1 points) is downloaded on first use and cached locally under
+  \texttt{\$HOME/.cache/fy/srs/}. After parsing, a batch Schwartz--Zippel
+  pairing verification~\cite{schwartz1980} checks consistency of all $\tau^i
+  \cdot G_1$ powers against $\tau \cdot G_2$:
+  \begin{equation}
+    e\!\Bigl(\sum_i r^i \cdot [\tau^{i+1}]G_1,\; G_2\Bigr)
+    = e\!\Bigl(\sum_i r^i \cdot [\tau^i]G_1,\; [\tau]G_2\Bigr)
+    \label{eq:srs-verify}
+  \end{equation}
+  for a random challenge $r \getsr \Fr$. This catches download corruption,
+  malformed transcripts, and inconsistent $G_1$/$G_2$ data in a single
+  multi-pairing.
+
+  For testing, a \texttt{testingSRSProvider} callback (set in
+  \texttt{\_test.go} \texttt{init()}) overrides the ceremony SRS with
+  \texttt{unsafekzg.NewSRS} (known toxic waste---\textbf{do not use in
+  production}). A runtime guard panics if \texttt{testingSRSProvider} is set
+  in a non-test binary.
+\end{remark}
+
+\begin{remark}[SRS Provenance vs.\ Integrity]
+  \label{rem:srs-provenance}
+  The pairing check~\eqref{eq:srs-verify} verifies \emph{internal consistency}
+  (the $G_1$ powers form a geometric progression under a single $\tau$) but does
+  \emph{not} verify \emph{provenance}: it cannot confirm that this particular
+  $\tau$ was generated by the Ignition ceremony rather than by an adversary who
+  knows $\tau$. Provenance assurance relies on (a)~downloading from the
+  canonical Ignition verification repository, and (b)~optionally pinning the
+  SRS to a known hash digest.  The current implementation verifies consistency
+  but does not pin a hash; deployers requiring stronger provenance guarantees
+  should add a SHA-256 digest check on the raw transcript before parsing.
+\end{remark}
+
+\begin{remark}[Lagrange SRS Cache Trust Model]
+  \label{rem:lagrange-cache}
+  After downloading and verifying the monomial SRS, the implementation precomputes
+  a Lagrange-basis SRS (required by PLONK) and caches it to disk. This cached
+  Lagrange SRS is loaded \emph{without re-verification} on subsequent runs, so
+  the cache directory (\texttt{\$HOME/.cache/fy/srs/}) must be trusted.
+  An adversary with write access to this directory could substitute a malicious
+  Lagrange SRS, enabling forged proofs. Deployers should protect the cache with
+  appropriate filesystem permissions, or delete the cache and re-derive on each
+  startup if the deployment environment is untrusted.
+\end{remark}
+
+\subsubsection{Secret Key Zeroing}
+
+After witness construction, the secret key material ($\sk$ as a
+\texttt{big.Int} and its serialized \texttt{skBytes}) is securely erased by:
+\begin{enumerate}[nosep]
+  \item Obtaining the underlying word array via \texttt{big.Int.Bits()} (shared
+    backing memory).
+  \item Overwriting each word with zero.
+  \item Calling \texttt{SetInt64(0)} to reset the logical value.
+  \item Overwriting the serialized \texttt{skBytes} array element-by-element.
+  \item Calling \texttt{runtime.KeepAlive} on both \texttt{skBigInt} and
+    \texttt{skBytes} to prevent the compiler from optimizing away the zeroing
+    by ensuring the variables are considered live until after the overwrite
+    completes.
+\end{enumerate}
+Steps~1--3 are necessary because \texttt{SetInt64(0)} alone only sets the
+length to zero without clearing the underlying memory. Step~5 is necessary
+because the Go compiler may otherwise elide dead stores to variables that are
+not read afterwards.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{DKG Protocol}
+\label{sec:dkg}
+
+The GOLDEN DKG consists of three phases: dealing (broadcast), verification, and
+completion (aggregation). It is non-interactive: each participant broadcasts a
+single message containing encrypted shares for all peers.
+
+% ── 6.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Parameters and Setup}
+\label{sec:dkg-setup}
+
+\begin{itemize}[nosep]
+  \item $n$: total participants, $2 \le n \le 256$ (\texttt{MaxParticipants}).
+    The upper bound is a DoS-prevention limit (the $\mathcal{O}(n^2)$ proof
+    count becomes impractical for larger groups) rather than a security
+    parameter.
+  \item $t$: threshold, $2 \le t \le n$. The minimum threshold $t = 2$ is
+    enforced for FROST compatibility: FROST's binding factor computation
+    requires at least two signers. A threshold of $t = 1$ degenerates to
+    single-party Schnorr signing.
+  \item $\sid \in \{0,1\}^{256}$: unique session identifier.
+  \item Each participant $i \in [1, n]$ holds $(\sk_i, \pk_i)$ where
+    $\sk_i \getsr \Fl \setminus \{0\}$ and $\pk_i = [\sk_i]\genbjj$.
+  \item All participants know all public keys $\{\pk_1, \ldots, \pk_n\}$.
+  \item Node IDs must be in $[1, 2^{31} - 1]$ (\texttt{MaxNodeID}) to fit in
+    \texttt{uint32} encoding for FROST Lagrange coefficient computation. The
+    encoding places the ID as a big-endian \texttt{uint32} at bytes $[28{:}32]$
+    of a 32-byte zero-padded buffer.
+\end{itemize}
+
+\begin{remark}[Subgroup Membership of Recipient Public Keys]
+  \label{rem:subgroup-check}
+  Baby Jubjub has cofactor $\cofactor = 8$. A malicious participant could
+  register a public key $\pk^* \notin \Gbj$ (i.e., a point in the order-$8\ell$
+  curve group but not in the prime-order subgroup of order~$\ell$). If
+  \texttt{CreateDealing} uses such a $\pk^*$ in the DH computation, the
+  resulting shared secret $[\sk_d]\pk^*$ may have low order, enabling a
+  small-subgroup attack that leaks information about $\sk_d \bmod 8$.
+
+  \medskip\noindent\textbf{Mitigation.}
+  The implementation performs an identity check ($\pk_j \ne \mathcal{O}$)
+  but does not currently enforce $[\ell]\pk_j = \mathcal{O}$. This is safe
+  \emph{provided} that public keys are validated at registration time
+  (e.g., by requiring a proof-of-possession or subgroup check). Deployments
+  that accept arbitrary BJJ points as public keys \textbf{must} add an
+  explicit subgroup check $[\ell]\pk_j = \mathcal{O}$ in
+  \texttt{CreateDealing} before the DH computation.
+\end{remark}
+
+% ── 6.2 ──────────────────────────────────────────────────────────────────────
+\subsection{Round 0: Non-Interactive Dealing}
+\label{sec:dealing}
+
+Each dealer $d \in [1, n]$ performs the following:
+
+\begin{algorithm}[H]
+\caption{$\mathsf{CreateDealing}(d, \{\pk_i\}_{i \ne d}, \sid, t, n)$}
+\label{alg:dealing}
+\begin{algorithmic}[1]
+\State \textbf{Require:} $\mathsf{CurveSuite} \ne \bot$ \Comment{$\mathsf{ErrNilSuite}$}
+\State \textbf{Validate:} $d \in [1, n]$; $t \ge 2$; $n \ge t$; $n \le 256$; all IDs unique in $[1, n]$
+
+\Statex \hrulefill\ \textit{Polynomial \& VSS}\ \hrulefill
+\State $\omega_d \getsr \Fr$ \Comment{Secret for this dealer}
+\State $f_d(x) \leftarrow \omega_d + a_1 x + \cdots + a_{t-1} x^{t-1}$,
+  \quad $a_i \getsr \Fr$
+\State $A_k \leftarrow [a_k]\genbn$ for $k = 0, \ldots, t-1$
+  \Comment{VSS commitments}
+\State $s_i \leftarrow f_d(i)$ for $i = 1, \ldots, n$
+  \Comment{Shamir shares over $\Fr$}
+
+\Statex \hrulefill\ \textit{Session Data}\ \hrulefill
+\State $\mathsf{randomMsg}_d \getsr \{0,1\}^{256}$
+\State $\pi_{\mathrm{id}} \leftarrow \mathsf{ProveIdentity}(\sk_d, \pk_d, \sid)$
+  \Comment{Schnorr PoK}
+\State $\alpha \leftarrow \hash_r(\texttt{"golden-lhl-alpha"} \,\|\, \sid)$
+  \Comment{LHL coefficient}
+
+\Statex \hrulefill\ \textit{Share Encryption}\ \hrulefill
+\For{each peer $j \ne d$}
+  \State $(\pad_{d,j},\, R_{d,j}) \leftarrow
+    \mathsf{DerivePad}(\sk_d, \pk_j, (\sid, \mathsf{randomMsg}_d), \alpha)$
+  \State $z_{d,j} \leftarrow \pad_{d,j} + s_j \in \Fr$
+    \Comment{Encrypt share}
+  \State $\pi_{d,j} \leftarrow \PLONK.\Prove(\mathsf{EVRFCircuit},\, \sk_d, \ldots)$
+    \Comment{ZK proof}
+  \State $\mathsf{Erase}(\pad_{d,j})$
+\EndFor
+
+\Statex \hrulefill\ \textit{Cleanup}\ \hrulefill
+\State $\mathsf{Erase}(f_d,\, \omega_d,\, \{s_j\}_{j \ne d})$
+
+\State \Return $\mathsf{Round0Msg} = \bigl(\sid,\, d,\, \mathsf{randomMsg}_d,\,
+  \mathbf{A},\, \{(R_{d,j}, z_{d,j})\}_{j \ne d},\, \pi_{\mathrm{id}},\,
+  \{\pi_{d,j}\}_{j \ne d}\bigr)$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{remark}
+  The dealer retains their own share $s_d = f_d(d)$ as private state for the
+  completion phase. All other secret material (polynomial coefficients, peer
+  shares, pads) is securely erased.
+\end{remark}
+
+% ── 6.3 ──────────────────────────────────────────────────────────────────────
+\subsection{Dealing Verification}
+\label{sec:verify}
+
+Each verifier $v$ checks a dealing message from dealer $d$:
+
+\begin{algorithm}[H]
+\caption{$\mathsf{VerifyDealing}(\mathsf{msg},\, \pk_d,\, \{\pk_j\}_{j \ne d},\, \sid,\, t)$}
+\label{alg:verify}
+\begin{algorithmic}[1]
+\State \textbf{Require:} $\mathsf{CurveSuite} \ne \bot$ \Comment{$\mathsf{ErrNilSuite}$}
+\State \textbf{Check:} $\mathsf{msg.SessionID} = \sid$
+\State \textbf{Check:} $|\mathbf{A}| = t$
+  \Comment{VSS commitment count matches threshold}
+\State \textbf{Check:} $A_0 \ne \mathcal{O}$
+  \Comment{Non-degenerate PK contribution}
+\State \textbf{Validate recipient set:}
+  (a)~$\pi_{\mathrm{id}} \ne \bot$;
+  (b)~dealer $d \notin \mathsf{Ciphertexts}.\mathsf{keys}$;
+  (c)~$|\mathsf{Ciphertexts}| = |\mathsf{Proofs}| = n - 1$;
+  (d)~$\forall\, j \ne d$: $j \in \mathsf{Ciphertexts}.\mathsf{keys} \cap \mathsf{Proofs}.\mathsf{keys}$;
+  (e)~$\forall\, j$: $\mathsf{Ciphertexts}[j] \ne \bot$;
+  (f)~$\forall\, j$: $R_{d,j} \ne \mathcal{O}$
+
+\Statex \hrulefill\ \textit{Identity Proof}\ \hrulefill
+\State $\mathsf{VerifyIdentity}(\pk_d, \sid, \pi_{\mathrm{id}})$
+  \Comment{Schnorr PoK on BJJ}
+
+\Statex \hrulefill\ \textit{Alpha Derivation}\ \hrulefill
+\State $\alpha \leftarrow \hash_r(\texttt{"golden-lhl-alpha"} \,\|\, \sid)$
+
+\Statex \hrulefill\ \textit{Ciphertext Consistency}\ \hrulefill
+\For{each recipient $j$}
+  \State Compute $\mathsf{LHS} = [z_{d,j}]\genbn$
+  \State Compute $\mathsf{RHS} = R_{d,j} + \VSS(j)$
+    \Comment{$\VSS(j) = \sum_k [j^k] A_k$}
+  \State \textbf{Check:} $\mathsf{LHS} = \mathsf{RHS}$
+    \Comment{See Proposition~\ref{prop:ct-verify}}
+\EndFor
+
+\Statex \hrulefill\ \textit{eVRF Proofs}\ \hrulefill
+\For{each recipient $j$}
+  \State Recompute $H_1, H_2$ from $\mathsf{sessData} = (\sid, \mathsf{randomMsg}_d)$
+  \State $\PLONK.\Verify(\pi_{d,j},\, \mathsf{vk},\, (\pk_d, \pk_j, H_1, H_2, \alpha, R_{d,j}))$
+\EndFor
+
+\State \Return $\mathsf{accept}$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{remark}[Verifier Scope]
+  Each verifier checks \emph{all} $n - 1$ ciphertext consistency equations and
+  \emph{all} $n - 1$ eVRF proofs in a dealing, not just the one addressed to
+  itself. This ensures a malicious dealer cannot selectively cheat by providing
+  a correct ciphertext/proof for one recipient while providing an incorrect one
+  for another.
+\end{remark}
+
+\begin{proposition}[Ciphertext Consistency]
+  \label{prop:ct-verify}
+  The verification equation $[z_{d,j}]\genbn = R_{d,j} + \VSS(j)$ holds for an
+  honest dealer:
+  \begin{align}
+    [z_{d,j}]\genbn
+    &= [\pad_{d,j} + s_j]\genbn \\
+    &= [\pad_{d,j}]\genbn + [s_j]\genbn \\
+    &= R_{d,j} + [f_d(j)]\genbn \\
+    &= R_{d,j} + \VSS(j) \qquad \text{(by~\eqref{eq:vss-verify})}
+  \end{align}
+\end{proposition}
+
+\medskip
+\noindent\textbf{Worked example (toy field $\F_{13}$).}
+Consider a group of order $13$ with generator $G$, threshold $t = 2$, and
+a dealer with polynomial $f(x) = 5 + 3x$ (so $\omega = 5$, $a_1 = 3$).
+The VSS commitments are $A_0 = [5]G$, $A_1 = [3]G$.
+For recipient $j = 2$, the share is $s_2 = f(2) = 5 + 6 = 11 \bmod 13$.
+Suppose the pad is $\pad = 7$. Then:
+\begin{itemize}[nosep]
+  \item $z_{d,2} = 7 + 11 = 18 \equiv 5 \pmod{13}$.
+  \item $R_{d,2} = [7]G$.
+  \item $\VSS(2) = [2^0]A_0 + [2^1]A_1 = [5]G + [6]G = [11]G$.
+  \item $\mathsf{LHS} = [5]G$.
+  \item $\mathsf{RHS} = [7]G + [11]G = [18]G = [5]G$. \checkmark
+\end{itemize}
+
+\begin{remark}
+  The ciphertext consistency check is \emph{independent} of the eVRF proof.
+  Together, they guarantee: (1)~the encrypted share is consistent with the
+  committed polynomial (ciphertext consistency), and (2)~the pad commitment was
+  correctly derived from the DH shared secret (eVRF proof). A dishonest dealer
+  cannot produce a valid ciphertext with a wrong share, nor a valid proof with
+  a wrong pad.
+\end{remark}
+
+% ── 6.4 ──────────────────────────────────────────────────────────────────────
+\subsection{Protocol Completion}
+\label{sec:complete}
+
+After receiving and verifying all $n-1$ peer dealings, participant $i$
+aggregates shares and computes the group key.
+
+\begin{remark}[Pre-Verified Dealings]
+  \label{rem:pre-verified}
+  \texttt{Complete} assumes that every dealing in the input set has
+  \emph{already passed} \texttt{VerifyDealing} (Algorithm~\ref{alg:verify}).
+  It does \textbf{not} re-run verification internally. Passing an unverified or
+  invalid dealing to \texttt{Complete} is a caller error that can produce
+  incorrect key shares. The reference implementation's \texttt{Complete}
+  function documents this precondition; callers are responsible for filtering
+  out invalid dealings before aggregation.
+\end{remark}
+
+\begin{algorithm}[H]
+\caption{$\mathsf{Complete}(i,\, \mathsf{ownDealing},\, \{\mathsf{msg}_d\}_{d \ne i},\,
+  \{\pk_d\}_{d \ne i},\, \sid,\, t,\, n)$}
+\label{alg:complete}
+\begin{algorithmic}[1]
+\State \textbf{Require:} $\mathsf{CurveSuite} \ne \bot$ \Comment{$\mathsf{ErrNilSuite}$}
+\State \textbf{Require:} All peer dealings have passed $\mathsf{VerifyDealing}$
+  \Comment{Caller precondition}
+\State \textbf{Validate:}
+  (a)~$|\mathsf{peerDealings}| = n - 1$;
+  (b)~no dealing from self ($d \ne i$ for all dealers $d$);
+  (c)~all dealer IDs unique;
+  (d)~all dealer IDs from known participants;
+  (e)~all session IDs match $\sid$
+
+\Statex \hrulefill\ \textit{Share Aggregation}\ \hrulefill
+\State $\mathsf{secretShare}_i \leftarrow s_{i,\mathrm{own}}$
+  \Comment{Own share from own polynomial}
+\State $\alpha \leftarrow \hash_r(\texttt{"golden-lhl-alpha"} \,\|\, \sid)$
+
+\For{each peer dealing from dealer $d$}
+  \State Retrieve ciphertext $(R_{d,i}, z_{d,i})$
+  \State $(\pad_{d,i}, \_) \leftarrow
+    \mathsf{DerivePad}(\sk_i, \pk_d, (\sid, \mathsf{randomMsg}_d), \alpha)$
+    \Comment{Re-derive pad}
+  \State $\hat{s}_{d,i} \leftarrow z_{d,i} - \pad_{d,i} \in \Fr$
+    \Comment{Decrypt share}
+  \State $\mathsf{Erase}(\pad_{d,i})$
+  \State $\mathsf{secretShare}_i \leftarrow \mathsf{secretShare}_i + \hat{s}_{d,i}$
+    \Comment{Accumulate in $\Fr$}
+  \State $\mathsf{Erase}(\hat{s}_{d,i})$
+\EndFor
+
+\Statex \hrulefill\ \textit{Group Key}\ \hrulefill
+\State $\mathsf{GroupKey} \leftarrow \sum_{d=1}^{n} A_{d,0}$
+  \Comment{Sum of $[\omega_d]\genbn$ over all dealers}
+
+\Statex \hrulefill\ \textit{Public Key Shares}\ \hrulefill
+\For{$j = 1, \ldots, n$}
+  \State $\mathsf{PKShare}_j \leftarrow \sum_{d=1}^{n} \VSS_d(j)$
+    \Comment{$= [\mathsf{secretShare}_j]\genbn$ for honest execution}
+\EndFor
+
+\State \Return $(\mathsf{GroupKey},\, \{\mathsf{PKShare}_j\}_{j=1}^n,\, \mathsf{secretShare}_i)$
+\end{algorithmic}
+\end{algorithm}
+
+\begin{theorem}[DKG Correctness]
+  \label{thm:dkg-correct}
+  After honest execution of the GOLDEN DKG:
+  \begin{enumerate}[nosep]
+    \item The combined polynomial is
+      $F(x) = \sum_{d=1}^{n} f_d(x)$, of degree $t-1$ over $\Fr$.
+    \item The group secret is
+      $\Omega = F(0) = \sum_{d=1}^{n} \omega_d \in \Fr$.
+    \item The group key is
+      $\mathsf{GroupKey} = [\Omega]\genbn$.
+    \item Each participant's aggregated share is
+      $\mathsf{secretShare}_i = F(i) = \sum_{d=1}^{n} f_d(i) \in \Fr$.
+    \item Any $t$ shares can reconstruct $\Omega$ via Lagrange
+      interpolation~\eqref{eq:lagrange}.
+    \item The public key share of participant $j$ satisfies
+      $\mathsf{PKShare}_j = [\mathsf{secretShare}_j]\genbn$.
+  \end{enumerate}
+\end{theorem}
+
+\begin{proof}
+  \textit{(1)} follows from the definition: each $f_d$ is degree $t-1$, so
+  their sum $F = \sum f_d$ is also degree $t-1$.
+
+  \textit{(2)} $F(0) = \sum f_d(0) = \sum \omega_d$ by linearity.
+
+  \textit{(3)} $\mathsf{GroupKey} = \sum A_{d,0} = \sum [\omega_d]\genbn
+  = [\sum \omega_d]\genbn = [\Omega]\genbn$.
+
+  \textit{(4)} By linearity of polynomial evaluation:
+  $\mathsf{secretShare}_i = s_{i,\mathrm{own}} + \sum_{d \ne i} \hat{s}_{d,i}
+  = f_i(i) + \sum_{d \ne i} f_d(i) = \sum_{d=1}^n f_d(i) = F(i)$.
+
+  \textit{(5)} $F$ is degree $t-1$, so $t$ evaluations determine $F$
+  uniquely by Lagrange interpolation.
+
+  \textit{(6)} $\sum_d \VSS_d(j) = \sum_d [f_d(j)]\genbn
+  = [\sum_d f_d(j)]\genbn = [F(j)]\genbn = [\mathsf{secretShare}_j]\genbn$.
+\end{proof}
+
+% ── 6.5 ──────────────────────────────────────────────────────────────────────
+\subsection{Multi-Curve Derived Shares}
+\label{sec:derived}
+
+The GOLDEN DKG supports generating key shares for \emph{multiple} elliptic
+curve groups from a single DKG execution. This allows a single $n$-party DKG
+to simultaneously produce, e.g., BN254~G1 key shares (for the primary FROST
+signing group) together with Baby~Jubjub or secp256k1 key shares for other
+applications, without running separate DKG instances.
+
+\subsubsection{Motivation}
+
+Running independent DKGs for each target curve would require $k$ separate
+broadcast rounds and $k \times n \times (n-1)$ PLONK proofs. By deriving
+shares from the \emph{same} polynomial, the protocol produces $k$ sets of
+correlated key shares with only $n \times (n-1)$ proofs (the primary eVRF
+proofs). The derived curves rely on algebraic consistency checks rather than
+additional zero-knowledge proofs.
+
+\subsubsection{Coefficient Derivation}
+
+Let $f_d(x) = a_0 + a_1 x + \cdots + a_{t-1} x^{t-1}$ be the dealer's
+polynomial over $\Fr$ (the primary outer-group field). For each derived group
+$\G_d$ with scalar field $\F_{q_d}$, the derived polynomial coefficients are:
+\begin{equation}
+  a'_k = a_k \bmod q_d, \qquad k = 0, \ldots, t-1
+  \label{eq:derived-coeff}
+\end{equation}
+where $a_k$ is the canonical byte serialization of the $\Fr$ coefficient,
+interpreted as an integer and reduced modulo $q_d$ (via \texttt{SetBytes},
+which auto-reduces).
+
+\begin{remark}[Statistical Bias]
+  When $q_d < r$ (e.g., BJJ where $\ell \approx 2^{251}$ and $r \approx 2^{254}$),
+  the reduction $a_k \bmod \ell$ introduces a statistical bias. A uniformly
+  random $a_k \in [0, r)$ reduced modulo $\ell$ produces a distribution with
+  statistical distance at most $\lfloor r / \ell \rfloor / r \approx 2^{-248}$
+  from uniform over $\F_\ell$. This is cryptographically negligible and does
+  not affect the Shamir threshold property. When $q_d > r$ (e.g., secp256k1
+  where $q \approx 2^{256}$), no reduction occurs; coefficients are injected
+  exactly.
+\end{remark}
+
+The derived polynomial is $f'_d(x) = a'_0 + a'_1 x + \cdots + a'_{t-1} x^{t-1}$
+over $\F_{q_d}$. Shares $s'_j = f'_d(j)$ and VSS commitments
+$A'_k = [a'_k] G_d$ are computed independently on the derived group.
+
+\subsubsection{Derived Ciphertexts}
+
+For each peer $j$, the cached pad bytes from the primary eVRF pad derivation
+(the canonical byte representation of $\pad \in \Fr$) are reduced modulo
+$q_d$:
+\begin{equation}
+  \pad'_{d,j} = \pad_{d,j} \bmod q_d
+  \label{eq:derived-pad}
+\end{equation}
+The derived ciphertext is:
+\begin{equation}
+  z'_{d,j} = \pad'_{d,j} + s'_j \in \F_{q_d}
+  \label{eq:derived-ct}
+\end{equation}
+An independent R~commitment is computed on the derived group:
+\begin{equation}
+  R'_{d,j} = [\pad'_{d,j}] G_d \in \G_d
+  \label{eq:derived-rcommit}
+\end{equation}
+Note that the derived R~commitment is \emph{not} the reduction of the primary
+$R_{d,j}$; it is freshly computed on $\G_d$ from the reduced pad. During
+verification, if $R'_{d,j} = \mathcal{O}$ the dealing is rejected with
+$\mathsf{ErrIdentityRCommitment}$ (same check as the primary R~commitment).
+
+\subsubsection{Derived Verification}
+
+Verification of derived ciphertexts uses the same algebraic consistency check
+as the primary curve:
+\begin{equation}
+  [z'_{d,j}] G_d \stackrel{?}{=} R'_{d,j} + \VSS'_d(j)
+  \label{eq:derived-verify}
+\end{equation}
+where $\VSS'_d(j) = \sum_{k=0}^{t-1} [j^k] A'_k$. The correctness argument
+is identical to Proposition~\ref{prop:ct-verify} with all operations in $\G_d$.
+
+\begin{proposition}[Derived Share Confidentiality]
+  \label{prop:derived-conf}
+  Let $\G_d$ be a derived group with scalar field $\F_{q_d}$ where $q_d \mid r$
+  (the BN254 scalar field order). If the primary pad $\pad_{d,j} \in \Fr$ is
+  computationally indistinguishable from uniform (Theorem~\ref{thm:pad-ind}),
+  then the derived pad $\pad'_{d,j} = \pad_{d,j} \bmod q_d$ is computationally
+  indistinguishable from uniform in $\F_{q_d}$.
+\end{proposition}
+
+\begin{proof}
+  Since $\pad_{d,j}$ is computationally indistinguishable from $U \getsr \Fr$,
+  it suffices to show that $U \bmod q_d$ is statistically close to uniform in
+  $\F_{q_d}$. Write $r = k \cdot q_d + \rho$ with $0 \le \rho < q_d$. The
+  reduction $U \bmod q_d$ is uniform over the residues $0, \ldots, q_d - 1$
+  with a statistical bias of at most $\rho / r \le q_d / r < 2^{-\lambda}$
+  (for $\lambda \approx 100$ when $q_d \approx 2^{253}$ and $r \approx 2^{254}$).
+  The computational indistinguishability of $\pad_{d,j}$ from $U$ adds at most
+  $\negl(\lambda)$ advantage, so the derived pad is computationally
+  indistinguishable from uniform in $\F_{q_d}$.
+\end{proof}
+
+\begin{remark}[Security of Derived Share Encryption]
+  No additional eVRF proofs are generated for derived curves. The security of
+  derived share encryption follows from Proposition~\ref{prop:derived-conf}
+  (derived pad indistinguishability) combined with the algebraic consistency
+  check~\eqref{eq:derived-verify} (which ties the ciphertext to the derived
+  VSS polynomial). A malicious dealer who passes the primary eVRF check and
+  all derived consistency checks has committed to polynomials whose evaluations
+  are correctly encrypted under the derived pads.
+\end{remark}
+
+\subsubsection{Derived Completion}
+
+During completion (Algorithm~\ref{alg:complete}), each participant aggregates
+derived shares analogously to the primary shares: start with the own derived
+share, then decrypt each peer's derived ciphertext by re-deriving the pad bytes
+(cached from the primary $\mathsf{DerivePad}$ call), reducing modulo $q_d$,
+and subtracting. The derived group key, public key shares, and secret share are
+computed identically to the primary output, but over $\G_d$.
+
+The derived output is converted to a FROST key share via
+$\mathsf{DkgOutputToDerivedKeyShare}$ (Section~\ref{sec:derived-bridge}).
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{FROST Integration}
+\label{sec:frost}
+
+The GOLDEN DKG output is designed for direct compatibility with the FROST
+threshold Schnorr signature scheme (RFC~9591).
+
+% ── 7.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Key Share Conversion}
+\label{sec:bridge}
+
+The bridge function $\mathsf{DkgOutputToKeyShare}$ maps:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{FROST Field} & \textbf{GOLDEN DKG Source} \\
+\midrule
+$\mathsf{KeyShare.ID}$ & $i$ encoded as big-endian \texttt{uint32} at bytes $[28{:}32]$ \\
+$\mathsf{KeyShare.SecretKey}$ & $\mathsf{secretShare}_i \in \Fr$ \\
+$\mathsf{KeyShare.PublicKey}$ & $\mathsf{PKShare}_i \in \Gbn$ \\
+$\mathsf{KeyShare.GroupKey}$ & $\mathsf{GroupKey} \in \Gbn$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The ID encoding matches FROST's internal \texttt{scalarFromInt} function:
+a 32-byte zero-padded buffer with the node ID as a big-endian \texttt{uint32}
+in the last 4 bytes. This ensures Lagrange coefficient computation in FROST
+is consistent with the Shamir evaluation points used in the DKG.
+
+\subsubsection{Derived Key Share Conversion}
+\label{sec:derived-bridge}
+
+For each derived group $\G_d$, the function
+$\mathsf{DkgOutputToDerivedKeyShare}(\G_d, i, \mathsf{DerivedOutput})$
+performs the same conversion as $\mathsf{DkgOutputToKeyShare}$ but using the
+derived group's generator and scalar field. The ID encoding is identical
+(big-endian \texttt{uint32} at bytes $[28{:}32]$). The resulting FROST key
+share can be used for threshold signing on the derived group.
+
+% ── 7.2 ──────────────────────────────────────────────────────────────────────
+\subsection{FROST Threshold Schnorr Signing}
+\label{sec:frostsign}
+
+Given $t$ signers with key shares from the DKG, FROST produces a standard
+Schnorr signature verifiable against the group key. The protocol has two
+rounds:
+
+\subsubsection{Round 1: Commitment}
+
+Each signer $i$ in the signing set $\mathcal{S}$ ($|\mathcal{S}| \ge t$):
+\begin{enumerate}[nosep]
+  \item Sample $d_i, e_i \getsr \Fr \setminus \{0\}$ \hfill (hiding and binding nonces)
+  \item $D_i \leftarrow [d_i]\genbn$, \quad $E_i \leftarrow [e_i]\genbn$
+    \hfill (nonce commitments)
+  \item Broadcast $(\id_i, D_i, E_i)$
+\end{enumerate}
+
+\subsubsection{Round 2: Signature Share}
+
+\begin{remark}[Notation for $z$]
+  The symbol $z$ is used for both DKG encrypted shares ($z_{d,j}$ in
+  Section~\ref{sec:encrypt}) and FROST signature shares ($z_i$ below). The
+  subscript convention distinguishes them: $z_{d,j}$ is indexed by
+  dealer--recipient pair, while $z_i$ is indexed by signer. In the aggregated
+  signature, $z$ (no subscript) denotes the combined signature scalar.
+\end{remark}
+
+Each signer $i$, given all commitments $\{(\id_j, D_j, E_j)\}_{j \in \mathcal{S}}$
+and message $m$:
+\begin{enumerate}[nosep]
+  \item Encode commitments:
+    $\mathsf{enc} = |\mathcal{S}| \,\|\, (\id_1 \,\|\, D_1 \,\|\, E_1) \,\|\, \cdots$
+    (length-prefixed)
+  \item For each signer $j$: $\rho_j = \hash_r^{(1)}(m, \mathsf{enc}, \id_j)$
+    \hfill (binding factor)
+  \item Group commitment: $R = \sum_{j \in \mathcal{S}} (D_j + [\rho_j] E_j)$
+  \item Challenge: $c = \hash_r^{(2)}(R, \mathsf{GroupKey}, m)$
+  \item Lagrange coefficient:
+    $\lambda_i = \prod_{j \in \mathcal{S},\, j \ne i} \frac{\id_j}{\id_j - \id_i}$
+  \item Signature share: $z_i = d_i + \rho_i \cdot e_i + \lambda_i \cdot \mathsf{secretKey}_i \cdot c$
+  \item Securely erase $d_i, e_i$
+\end{enumerate}
+
+\subsubsection{Aggregation}
+
+The coordinator (or any party) computes:
+\begin{equation}
+  z = \sum_{i \in \mathcal{S}} z_i, \qquad \sigma = (R, z)
+  \label{eq:aggregate}
+\end{equation}
+
+\subsubsection{Verification}
+
+Standard Schnorr verification:
+\begin{equation}
+  [z]\genbn \stackrel{?}{=} R + [c]\mathsf{GroupKey}
+  \label{eq:verify-sig}
+\end{equation}
+where $c = \hash_r^{(2)}(R, \mathsf{GroupKey}, m)$.
+
+\begin{proposition}[FROST Correctness]
+  For an honestly generated signature:
+  \begin{align}
+    [z]\genbn
+    &= \Bigl[\sum_{i} \bigl(d_i + \rho_i e_i + \lambda_i \cdot \mathsf{sk}_i \cdot c\bigr)\Bigr]\genbn \\
+    &= \sum_{i} \bigl([d_i]\genbn + [\rho_i][e_i]\genbn\bigr)
+      + c \cdot \Bigl[\sum_{i} \lambda_i \cdot \mathsf{sk}_i\Bigr]\genbn \\
+    &= \sum_{i} (D_i + [\rho_i]E_i) + c \cdot [F(0)]\genbn \\
+    &= R + [c]\mathsf{GroupKey}
+  \end{align}
+  The third equality uses the Lagrange interpolation property:
+  $\sum_{i \in \mathcal{S}} \lambda_i \cdot F(i) = F(0) = \Omega$.
+\end{proposition}
+
+% ── 7.3 ──────────────────────────────────────────────────────────────────────
+\subsection{Piggyback Nonce Preprocessing}
+\label{sec:piggyback}
+
+Standard FROST signing (Section~\ref{sec:frostsign}) requires two interactive
+rounds: Round~1 broadcasts nonce commitments, and Round~2 broadcasts signature
+shares.  Piggyback nonce preprocessing reduces the steady-state online cost to
+\emph{one round} by attaching each signer's \emph{next} nonce commitment
+alongside the current signature share.  A one-time two-round bootstrap
+initializes the nonce pipeline; every subsequent session is a single message.
+
+% ── 7.3.1 ────────────────────────────────────────────────────────────────────
+\subsubsection{Motivation}
+\label{sec:piggyback-motivation}
+
+In latency-sensitive applications (e.g., blockchain validation, real-time
+co-signing), eliminating a round trip is significant.  The core observation is
+that FROST Round~1 generates nonces \emph{independently} of the message to be
+signed---only Round~2 depends on the message and on other signers'
+commitments.  Therefore a signer can pre-generate its Round~1 nonce for
+session~$N{+}1$ during session~$N$ and broadcast the commitment alongside the
+Round~2 share for session~$N$.  Recipients store the piggybacked commitment
+and use it as the Round~1 commitment in session~$N{+}1$, skipping that round
+entirely.
+
+After a two-round bootstrap that initializes the nonce pipeline, every
+subsequent session exchanges a single message per signer:
+$(z_i,\, D_i^{\mathrm{next}},\, E_i^{\mathrm{next}})$.
+
+% ── 7.3.2 ────────────────────────────────────────────────────────────────────
+\subsubsection{Piggyback State}
+\label{sec:piggyback-state}
+
+Each signer $i$ maintains a piggyback state tuple:
+\begin{equation}
+  \mathsf{PBState}_i = (\id_i,\; d^{\mathrm{next}},\; e^{\mathrm{next}},\;
+    D^{\mathrm{next}},\; E^{\mathrm{next}},\; \sigma,\; \mathsf{active})
+  \label{eq:pbstate}
+\end{equation}
+where:
+\begin{itemize}[nosep]
+  \item $\id_i$: the signer's participant identifier.
+  \item $d^{\mathrm{next}}, e^{\mathrm{next}} \in \Fr \setminus \{0\}$:
+    pre-generated hiding and binding nonce scalars for the next session
+    (secret; zeroed after consumption).
+  \item $D^{\mathrm{next}} = [d^{\mathrm{next}}]\genbn$,\;
+    $E^{\mathrm{next}} = [e^{\mathrm{next}}]\genbn$:
+    corresponding public commitments (broadcast with the current share).
+  \item $\sigma \in \{0, 1, \ldots, 2^{64}-1\}$: a monotonically increasing
+    session index, cryptographically bound into the binding factor to prevent
+    cross-session commitment replay.
+  \item $\mathsf{active} \in \{\mathsf{true}, \mathsf{false}\}$: whether the
+    state holds a valid pending nonce ready for consumption.
+\end{itemize}
+
+\begin{definition}[Session-Bound Message]
+  \label{def:session-msg}
+  For session index $\sigma$ and application message $m$, the session-bound
+  message is:
+  \begin{equation}
+    \mathsf{sessionMsg} = \mathrm{be64}(\sigma) \,\|\, m
+    \label{eq:session-msg}
+  \end{equation}
+  where $\mathrm{be64}$ encodes $\sigma$ as 8 big-endian bytes.  This
+  substitutes for $m$ in all $\mathsf{SignRound2}$ calls within the
+  piggyback protocol, ensuring the binding factor
+  $\rho_j = \hash_r^{(1)}(\mathsf{sessionMsg}, \mathsf{enc}, \id_j)$ is
+  session-specific.
+\end{definition}
+
+% ── 7.3.3 ────────────────────────────────────────────────────────────────────
+\subsubsection{Bootstrap Protocol}
+\label{sec:piggyback-bootstrap}
+
+The bootstrap is a standard two-round FROST session augmented with
+pre-generation of the next nonce pair.  It transitions the state from
+$\mathsf{INACTIVE}$ to $\mathsf{ACTIVE}$.
+
+\begin{algorithm}[H]
+\caption{$\mathsf{BootstrapRound1}(r,\, \mathsf{state},\, \mathsf{share})$}
+\label{alg:bootstrap-r1}
+\begin{algorithmic}[1]
+\State \textbf{Lock} $\mathsf{state}.\mu$
+\Statex \hrulefill\ \textit{Session 0 nonce}\ \hrulefill
+\State $(d_0, e_0, D_0, E_0) \leftarrow \mathsf{SignRound1}(r, \mathsf{share})$
+  \Comment{Current session nonce}
+\Statex \hrulefill\ \textit{Session 1 nonce (pre-generated)}\ \hrulefill
+\State $(d^{\mathrm{next}}, e^{\mathrm{next}}, D^{\mathrm{next}}, E^{\mathrm{next}})
+  \leftarrow \mathsf{SignRound1}(r, \mathsf{share})$
+\If{RNG failure}
+  \State $d_0.\mathsf{Zero}()$;\; $e_0.\mathsf{Zero}()$
+  \State \Return $\bot$
+\EndIf
+\State $\mathsf{state}.(d^{\mathrm{next}}, e^{\mathrm{next}}, D^{\mathrm{next}}, E^{\mathrm{next}})
+  \leftarrow (d^{\mathrm{next}}, e^{\mathrm{next}}, D^{\mathrm{next}}, E^{\mathrm{next}})$
+\State $\mathsf{state}.\sigma \leftarrow 1$
+\Comment{Next session is $\sigma = 1$}
+\State \textbf{Unlock} $\mathsf{state}.\mu$
+\State \Return $(d_0, e_0, D_0, E_0)$
+  \Comment{Caller broadcasts $(D_0, E_0)$}
+\end{algorithmic}
+\end{algorithm}
+
+After collecting all signers' commitments for session~0, each signer runs:
+
+\begin{algorithm}[H]
+\caption{$\mathsf{BootstrapRound2}(\mathsf{share},\, \mathsf{state},\,
+  (d_0, e_0),\, m,\, \{(\id_j, D_j, E_j)\}_{j \in \mathcal{S}})$}
+\label{alg:bootstrap-r2}
+\begin{algorithmic}[1]
+\State \textbf{Lock} $\mathsf{state}.\mu$
+\State $\mathsf{sessionMsg} \leftarrow \mathrm{be64}(0) \,\|\, m$
+  \Comment{Bootstrap is session $\sigma = 0$}
+\State $z_i \leftarrow \mathsf{SignRound2}(\mathsf{share},\, (d_0, e_0),\,
+  \mathsf{sessionMsg},\, \mathsf{commitments})$
+\Comment{$d_0, e_0$ zeroed by \texttt{defer}}
+\State $\mathsf{state}.\mathsf{active} \leftarrow \mathsf{true}$
+\State \textbf{Unlock} $\mathsf{state}.\mu$
+\State \Return $\bigl(z_i,\; \mathsf{state}.D^{\mathrm{next}},\;
+  \mathsf{state}.E^{\mathrm{next}},\; \mathsf{state}.\sigma\bigr)$
+  \Comment{Piggybacked share}
+\end{algorithmic}
+\end{algorithm}
+
+% ── 7.3.4 ────────────────────────────────────────────────────────────────────
+\subsubsection{Steady-State Protocol}
+\label{sec:piggyback-steady}
+
+After bootstrap, each subsequent session is a single-round protocol.  The
+signer consumes the pending nonce, signs, and simultaneously pre-generates and
+broadcasts the next nonce.
+
+\begin{algorithm}[H]
+\caption{$\mathsf{PiggybackSign}(r,\, \mathsf{share},\, \mathsf{state},\,
+  m,\, \{(\id_j, D_j, E_j)\}_{j \in \mathcal{S}})$}
+\label{alg:piggyback-sign}
+\begin{algorithmic}[1]
+\State \textbf{Lock} $\mathsf{state}.\mu$
+
+\Statex \hrulefill\ \textit{State validation}\ \hrulefill
+\State \textbf{Require} $\mathsf{state}.\mathsf{active} = \mathsf{true}$
+  \hfill \Comment{Else $\mathsf{ErrPiggybackInactive}$}
+\State \textbf{Require} $\mathsf{state}.\sigma < 2^{64} - 1$
+  \hfill \Comment{Else $\mathsf{ErrSessionOverflow}$}
+\State \textbf{Require} $\mathsf{state}.d^{\mathrm{next}} \ne \bot$
+
+\Statex \hrulefill\ \textit{Pre-validation (retryable on failure)}\ \hrulefill
+\State \textbf{Check} $|\mathcal{S}| \ge t$
+  \Comment{Threshold}
+\State \textbf{Check} $\forall\, j$: $D_j \ne \mathcal{O}$ and $E_j \ne \mathcal{O}$
+  \Comment{Identity point rejection (RFC~9591~\S4.3)}
+\State \textbf{Check} no duplicate $\id_j$ in $\mathcal{S}$
+\State \textbf{Check} $(\id_i, \mathsf{state}.D^{\mathrm{next}}, \mathsf{state}.E^{\mathrm{next}})
+  \in \{(\id_j, D_j, E_j)\}_{j \in \mathcal{S}}$
+  \Comment{Own commitment present}
+\If{any check fails} \Return error \Comment{State unchanged; caller may retry}
+\EndIf
+
+\Statex \hrulefill\ \textit{Pre-generate next nonce (retryable on failure)}\ \hrulefill
+\State $(d^{\mathrm{new}}, e^{\mathrm{new}}, D^{\mathrm{new}}, E^{\mathrm{new}})
+  \leftarrow \mathsf{SignRound1}(r, \mathsf{share})$
+\If{RNG failure} \Return error \Comment{State unchanged; caller may retry}
+\EndIf
+
+\Statex \hrulefill\ \textit{Point of no return: consume nonce}\ \hrulefill
+\State $(d^{\mathrm{clone}}, e^{\mathrm{clone}}) \leftarrow
+  \mathsf{Clone}(\mathsf{state}.d^{\mathrm{next}},\,
+  \mathsf{state}.e^{\mathrm{next}})$
+  \Comment{Deep copy via $\mathsf{Scalar.Set}$}
+\State $\mathsf{state}.d^{\mathrm{next}}.\mathsf{Zero}()$;\;
+  $\mathsf{state}.e^{\mathrm{next}}.\mathsf{Zero}()$
+  \Comment{Erase original}
+\State $\mathsf{state}.(d^{\mathrm{next}}, e^{\mathrm{next}},
+  D^{\mathrm{next}}, E^{\mathrm{next}}) \leftarrow
+  (d^{\mathrm{new}}, e^{\mathrm{new}}, D^{\mathrm{new}}, E^{\mathrm{new}})$
+  \Comment{Install new}
+
+\Statex \hrulefill\ \textit{Sign with session-bound message}\ \hrulefill
+\State $\mathsf{sessionMsg} \leftarrow \mathrm{be64}(\mathsf{state}.\sigma) \,\|\, m$
+\State $z_i \leftarrow \mathsf{SignRound2}(\mathsf{share},\,
+  (d^{\mathrm{clone}}, e^{\mathrm{clone}}),\,
+  \mathsf{sessionMsg},\, \mathsf{commitments})$
+  \Comment{$d^{\mathrm{clone}}, e^{\mathrm{clone}}$ zeroed by \texttt{defer}}
+\If{$\mathsf{SignRound2}$ fails}
+  \State $\mathsf{state}.d^{\mathrm{next}}.\mathsf{Zero}()$;\;
+    $\mathsf{state}.e^{\mathrm{next}}.\mathsf{Zero}()$
+    \Comment{Erase newly installed nonce}
+  \State $\mathsf{state}.\mathsf{active} \leftarrow \mathsf{false}$
+    \Comment{$\mathsf{FAILED}$ state: must $\mathsf{ReBootstrap}$}
+  \State \Return $\bot$
+\EndIf
+
+\Statex \hrulefill\ \textit{Success}\ \hrulefill
+\State $\mathsf{state}.\sigma \leftarrow \mathsf{state}.\sigma + 1$
+\State \textbf{Unlock} $\mathsf{state}.\mu$
+\State \Return $\bigl(z_i,\; \mathsf{state}.D^{\mathrm{next}},\;
+  \mathsf{state}.E^{\mathrm{next}},\; \mathsf{state}.\sigma\bigr)$
+\end{algorithmic}
+\end{algorithm}
+
+The state machine is:
+\[
+  \mathsf{INACTIVE}
+  \xrightarrow{\mathsf{Bootstrap}}
+  \mathsf{ACTIVE}
+  \xrightarrow[\text{success}]{\mathsf{PiggybackSign}}
+  \mathsf{ACTIVE}
+  \xrightarrow[\mathsf{SignRound2}\text{ fail}]{\mathsf{PiggybackSign}}
+  \mathsf{FAILED}
+  \xrightarrow{\mathsf{ReBootstrap}}
+  \mathsf{INACTIVE}
+\]
+
+% ── 7.3.5 ────────────────────────────────────────────────────────────────────
+\subsubsection{Commitment Collection and Aggregation}
+\label{sec:piggyback-collect}
+
+After receiving piggybacked shares from all signers in session~$N$, a
+collector (any party) extracts the commitments for session~$N{+}1$ and
+aggregates the current session's signature.
+
+\medskip\noindent
+\textbf{Commitment collection.}
+For each received piggybacked share
+$(z_j,\, D_j^{\mathrm{next}},\, E_j^{\mathrm{next}},\, \sigma_j)$:
+\begin{enumerate}[nosep]
+  \item \textbf{Non-nil:} $D_j^{\mathrm{next}} \ne \bot$ and
+    $E_j^{\mathrm{next}} \ne \bot$.
+  \item \textbf{ID match:} the commitment's signer ID equals the signature
+    share's signer ID.
+  \item \textbf{Session index:} $\sigma_j$ equals the expected next session
+    index $\sigma_{\mathrm{expected}}$.
+  \item \textbf{Identity check:} $D_j^{\mathrm{next}} \ne \mathcal{O}$ and
+    $E_j^{\mathrm{next}} \ne \mathcal{O}$ (RFC~9591~\S4.3).
+  \item \textbf{No duplicates:} each signer ID appears at most once.
+\end{enumerate}
+Collected commitments are stored in a map keyed by signer ID bytes and
+returned sorted by ID for deterministic binding factor computation.
+
+\medskip\noindent
+\textbf{Aggregation.}
+$\mathsf{PiggybackAggregate}$ combines signature aggregation and commitment
+collection:
+\begin{enumerate}[nosep]
+  \item Extract the standard $\mathsf{SignatureShare}$ values from the
+    piggybacked shares.
+  \item Compute $\mathsf{sessionMsg} = \mathrm{be64}(\sigma) \,\|\, m$.
+  \item Aggregate using
+    $\mathsf{AggregateWithVerification}(\mathsf{sessionMsg},\,
+    \mathsf{commitments},\, \mathsf{sigShares},\, \mathsf{publicKeys},\,
+    \mathsf{GroupKey})$.
+    \textbf{Per-share verification is mandatory}
+    (Section~\ref{sec:frostsign}); plain $\mathsf{Aggregate}$ must not be used,
+    as it cannot detect commitment substitution by a man-in-the-middle.
+  \item Collect next-session commitments via $\mathsf{CollectPiggybackCommitments}$.
+  \item Return $(\sigma_{\mathrm{sig}},\, \mathsf{nextCommitments})$.
+\end{enumerate}
+
+% ── 7.3.6 ────────────────────────────────────────────────────────────────────
+\subsubsection{Re-Bootstrap Conditions}
+\label{sec:piggyback-rebootstrap}
+
+The nonce pipeline must be restarted (all signers in the active set
+re-bootstrap) when any of the following occurs:
+\begin{enumerate}[nosep]
+  \item \textbf{Signer set change.} A signer goes offline or a new signer
+    joins.  Different commitment sets produce different binding factors, so
+    cached commitments are incompatible.
+  \item \textbf{Stale session index.} A signer receives commitments with a
+    session index that does not match its own $\sigma$.
+  \item \textbf{$\mathsf{SignRound2}$ failure.} After nonce consumption, the
+    signing step fails.  The pending nonce is zeroed and the state transitions
+    to $\mathsf{FAILED}$; the chain is irrecoverably broken.
+  \item \textbf{Explicit call.} The application explicitly invokes
+    $\mathsf{ReBootstrap}()$, which securely erases all pending nonce material
+    and resets $\sigma$ to~0.
+\end{enumerate}
+
+\begin{remark}
+  Re-bootstrap by \emph{any} signer in the active set requires \emph{all}
+  signers to re-bootstrap.  The detection mechanism is: a signer that needs
+  re-bootstrap sends a standard Round~1 commitment (without piggyback
+  data).  Recipients detect this as a bootstrap message and re-enter
+  bootstrap mode themselves.
+\end{remark}
+
+% ── 7.3.7 ────────────────────────────────────────────────────────────────────
+\subsubsection{Security Argument}
+\label{sec:piggyback-security}
+
+\begin{definition}[EUF-CMA Security]
+  \label{def:euf-cma}
+  A threshold signature scheme is \emph{existentially unforgeable under
+  chosen-message attack} (EUF-CMA) if no probabilistic polynomial-time
+  adversary, controlling up to $t{-}1$ corrupted signers, can produce a valid
+  signature on a message $m^*$ that was never signed by the honest signers,
+  even after adaptively requesting signatures on messages of its choice.
+\end{definition}
+
+\begin{proposition}[Piggyback Security Reduction]
+  \label{prop:piggyback-security}
+  If FROST is EUF-CMA secure (Definition~\ref{def:euf-cma}) against a static
+  $t{-}1$ adversary, then Piggyback FROST is EUF-CMA secure under the same
+  assumptions plus authenticated message delivery of piggybacked shares.
+\end{proposition}
+
+\begin{proof}[Proof sketch]
+  We reduce Piggyback FROST security to standard FROST security by showing
+  that each piggyback session~$N$ is indistinguishable from a standard
+  two-round FROST session in which Round~1 was delivered during session~$N{-}1$.
+
+  \begin{enumerate}
+    \item \textbf{Reduction to standard FROST.}
+      In session~$N$, each signer uses the nonce $(d_i, e_i)$ that was
+      pre-generated in session~$N{-}1$ and whose commitment $(D_i, E_i)$ was
+      broadcast alongside session~$N{-}1$'s signature share.  The signing
+      computation in session~$N$ is \emph{identical} to
+      $\mathsf{SignRound2}(\mathsf{share},\, (d_i, e_i),\,
+      \mathsf{sessionMsg},\, \mathsf{commitments})$.  No structural change is
+      made to the FROST signing algorithm; only the \emph{timing} of Round~1
+      delivery differs.
+
+    \item \textbf{Nonce independence.}
+      Each nonce pair $(d_i, e_i)$ is sampled from fresh randomness via
+      $\mathsf{SignRound1}$.  There is no cryptographic chain or derivation
+      linking consecutive nonces: nonce~$N{+}1$ is independent of nonce~$N$.
+      Compromising one session's nonce reveals nothing about adjacent sessions.
+
+    \item \textbf{Binding factor separation.}
+      The piggybacked commitments $(D_j^{\mathrm{next}}, E_j^{\mathrm{next}})$
+      for session~$N{+}1$ are \emph{not} included in session~$N$'s encoded
+      commitment list.  They are carried in the message envelope but never
+      passed to $\mathsf{encodeCommitments}$ or
+      $\mathsf{computeBindingFactors}$.  Therefore they do not affect
+      session~$N$'s binding factors $\rho_j$ or challenge $c$.
+
+    \item \textbf{Session isolation.}
+      The session index $\sigma$ is prepended to the message before binding
+      factor computation (Definition~\ref{def:session-msg}).  Even if an
+      adversary replays a commitment from session~$N$ into session~$N'$, the
+      binding factor $\rho_j = \hash_r^{(1)}(\mathrm{be64}(\sigma') \,\|\, m,\,
+      \mathsf{enc},\, \id_j)$ will differ (since $\sigma \ne \sigma'$),
+      producing a distinct effective nonce for the same $(d_j, e_j)$.  This
+      prevents cross-session nonce reuse.
+  \end{enumerate}
+
+  Combining these four observations, any forgery against Piggyback FROST
+  implies a forgery against standard FROST in some session~$N$ (with Round~1
+  delivered earlier), contradicting the assumed EUF-CMA security of FROST.
+\end{proof}
+
+\begin{remark}[Transport Authentication Requirement]
+  \label{rem:transport-auth}
+  The security reduction assumes \emph{authenticated delivery} of piggybacked
+  shares.  Concretely, the transport layer (TLS, Noise protocol, etc.) must
+  guarantee that a received $(z_j,\, D_j^{\mathrm{next}},\,
+  E_j^{\mathrm{next}},\, \sigma_j)$ was indeed sent by signer~$j$.
+  Without authentication, an active adversary could substitute piggybacked
+  commitments, causing honest signers to use adversary-chosen nonce points in
+  the next session.  Mandatory use of $\mathsf{AggregateWithVerification}$
+  detects such substitution \emph{after the fact} (invalid shares will fail
+  verification), but authenticated delivery prevents the attack entirely.
+\end{remark}
+
+\begin{remark}[Commitment Binding Separation]
+  \label{rem:binding-separation}
+  It is critical that the piggybacked next-session commitments
+  $(D_j^{\mathrm{next}}, E_j^{\mathrm{next}})$ are \emph{inert} with respect
+  to the current session's cryptographic computation.  They are never hashed
+  into the current session's binding factors or challenge.  The separation
+  ensures that a malicious signer cannot influence the current session's
+  security by choosing adversarial next-session commitments.
+\end{remark}
+
+\begin{remark}[Adaptive Message Choice]
+  \label{rem:adaptive-msg}
+  In the piggyback model, a signer commits to nonces for session~$N{+}1$
+  \emph{before} the message $m_{N+1}$ is known. An adversary who sees
+  $(D_j^{\mathrm{next}}, E_j^{\mathrm{next}})$ could attempt to choose
+  $m_{N+1}$ adaptively based on these commitments. This is precisely the
+  setting covered by FROST's EUF-CMA security proof: FROST's binding factor
+  mechanism (which hashes the message, all commitments, and participant IDs)
+  ensures that the adversary cannot exploit knowledge of commitments to forge
+  a signature. The reduction in Proposition~\ref{prop:piggyback-security}
+  therefore holds even under adaptive message selection---the adversary's
+  power in the piggyback setting is a strict subset of its power in the
+  standard FROST CMA game.
+\end{remark}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Security Analysis}
+\label{sec:security}
+
+% ── 8.1 ──────────────────────────────────────────────────────────────────────
+\subsection{Security Model and Assumptions}
+\label{sec:secmodel}
+
+The security model is defined in Section~\ref{sec:secmodel-intro}. We
+summarize the key points:
+
+\begin{itemize}
+  \item \textbf{Authenticated broadcast channel.} The protocol assumes all
+    Round0Msg broadcasts are delivered authentically with eventual delivery.
+    The Schnorr identity proof binds the dealing to the dealer's BJJ key, but
+    message integrity is assumed from the transport layer.
+
+  \item \textbf{Static corruption (no adaptive).} The adversary chooses which
+    parties to corrupt before the protocol begins. Corrupted parties may deviate
+    arbitrarily (Byzantine faults, rushing adversary). Adaptive corruption is
+    \emph{not} considered.
+
+  \item \textbf{Threshold adversary.} At most $t - 1$ participants are
+    corrupted.
+
+  \item \textbf{Computational assumptions.} DDH on $\Gbj$, DL on $\Gbn$,
+    PLONK knowledge soundness (AGM + ROM).
+\end{itemize}
+
+% ── 8.2 ──────────────────────────────────────────────────────────────────────
+\subsection{Security Properties}
+\label{sec:secprops}
+
+We state the four main security theorems with game-based reductions.
+In each game, $\mathcal{A}$ denotes a PPT adversary corrupting at most
+$t - 1$ parties (chosen statically before Round~0).
+
+\begin{theorem}[Pad Indistinguishability]
+  \label{thm:pad-ind}
+  Under the DDH assumption on $\Gbj$, no PPT adversary $\mathcal{A}$ can
+  distinguish the pad $\pad_{d,j}$ from a uniformly random element of $\Fr$
+  with non-negligible advantage, for any honest dealer $d$ and honest
+  recipient $j$.
+\end{theorem}
+
+\begin{proof}
+  We construct a sequence of games.
+
+  \smallskip\noindent\textbf{Game~0 (Real).}
+  $\mathcal{A}$ receives the transcript of an honest execution, including
+  all dealings from corrupted parties and the public components of honest
+  dealings. The pad is $\pad_{d,j} = \Extract([\dhx]H_1) + \alpha \cdot
+  \Extract([\dhx]H_2)$ where $\dhx = \Extract([\sk_d]\pk_j)$.
+
+  \smallskip\noindent\textbf{Game~1 (DDH Switch).}
+  Replace the DH shared secret $S = [\sk_d \sk_j]\genbjj$ with a random
+  subgroup point $S^* \getsr \Gbj$. By DDH on $\Gbj$, $|\Pr[\mathcal{A}
+  \text{ wins in Game~0}] - \Pr[\mathcal{A} \text{ wins in Game~1}]| \le
+  \epsilon_{\mathrm{DDH}}$.
+
+  \smallskip\noindent\textbf{Game~2 (LHL Extraction).}
+  In Game~1, $\dhx^* = \Extract(S^*)$ is the x-coordinate of a uniformly random
+  subgroup point, yielding HILL min-entropy $\ge \log\ell - 1 \ge 252$ bits.
+  The points $P_1^* = [\dhx^*]H_1$ and $P_2^* = [\dhx^*]H_2$ are independent
+  (since $H_1, H_2$ are outputs of independent hash-to-curve evaluations).
+  By the computational Leftover Hash Lemma (Lemma~\ref{lem:clhl}), replacing
+  $\pad$ with $U \getsr \Fr$ introduces at most $\epsilon_{\mathrm{LHL}}$
+  distinguishing advantage.
+
+  \smallskip\noindent
+  Total advantage: $\mathrm{Adv}(\mathcal{A}) \le \epsilon_{\mathrm{DDH}}
+  + \epsilon_{\mathrm{LHL}} = \negl(\lambda)$.
+\end{proof}
+
+\begin{theorem}[Share Confidentiality]
+  \label{thm:share-conf}
+  Under the DDH assumption on $\Gbj$ and PLONK knowledge soundness, no PPT
+  adversary corrupting at most $t - 1$ parties can distinguish the encrypted
+  share $z_{d,j}$ of an honest dealer $d$ to an honest recipient $j$ from a
+  uniformly random $\Fr$ element.
+\end{theorem}
+
+\begin{proof}
+  Consider the following game:
+
+  \smallskip\noindent\textbf{Game~0 (Real).}
+  $\mathcal{A}$ sees $z_{d,j} = \pad_{d,j} + s_j$ where $s_j = f_d(j)$.
+
+  \smallskip\noindent\textbf{Game~1 (Random Pad).}
+  Replace $\pad_{d,j}$ with $U \getsr \Fr$. By Theorem~\ref{thm:pad-ind},
+  $|\Pr[\text{Game~0}] - \Pr[\text{Game~1}]| \le \negl(\lambda)$.
+
+  \smallskip\noindent
+  In Game~1, $z_{d,j} = U + s_j$ is a one-time pad encryption: for any
+  fixed $s_j$, the distribution of $z_{d,j}$ is uniform over $\Fr$. The
+  PLONK knowledge soundness ensures the dealer actually uses the pad
+  derived from the DH secret (otherwise the eVRF proof would not verify),
+  preventing a malicious dealer from substituting a known pad value.
+\end{proof}
+
+\begin{theorem}[Dealing Integrity]
+  \label{thm:dealing-integrity}
+  Under the discrete logarithm assumption on $\Gbn$ and PLONK knowledge
+  soundness, no PPT adversary (as a malicious dealer) can produce a dealing
+  that passes $\mathsf{VerifyDealing}$ while distributing shares inconsistent
+  with a degree-$(t{-}1)$ polynomial.
+\end{theorem}
+
+\begin{proof}
+  Suppose a malicious dealer $d^*$ produces a dealing that passes verification.
+
+  \smallskip\noindent\textbf{Step~1 (Ciphertext consistency).}
+  For each recipient $j$, verification checks
+  $[z_{d^*,j}]\genbn = R_{d^*,j} + \VSS(j)$ (Proposition~\ref{prop:ct-verify}).
+  This implies $z_{d^*,j} = r_{d^*,j} + f_{d^*}(j)$ where $r_{d^*,j}$ is
+  the discrete log of $R_{d^*,j}$ and $f_{d^*}(x)$ is the polynomial committed
+  by the VSS commitments $\{A_k\}$. (If $z_{d^*,j} \ne r_{d^*,j} + f_{d^*}(j)$,
+  the check fails by the DL assumption on $\Gbn$.)
+
+  \smallskip\noindent\textbf{Step~2 (eVRF binding).}
+  The PLONK proof $\pi_{d^*,j}$ attests that $R_{d^*,j} = [\pad]\genbn$
+  where $\pad$ is the correctly derived LHL pad from the DH shared secret.
+  By knowledge soundness, the dealer cannot produce a valid proof for an
+  $R_{d^*,j}$ that is not the pad commitment, except with negligible
+  probability.
+
+  \smallskip\noindent\textbf{Step~3 (Share extraction).}
+  Combining Steps~1--2: $z_{d^*,j} = \pad_{d^*,j} + f_{d^*}(j)$ for the
+  committed polynomial $f_{d^*}$. The decrypted share is
+  $\hat{s}_j = z_{d^*,j} - \pad_{d^*,j} = f_{d^*}(j)$, which lies on the
+  degree-$(t{-}1)$ polynomial. Any deviation is detected.
+\end{proof}
+
+\begin{theorem}[Session Binding]
+  \label{thm:session-binding}
+  Identity proofs and eVRF pads are bound to the session ID $\sid$. No PPT
+  adversary can replay a dealing from session $\sid'$ into session $\sid \ne
+  \sid'$ such that verification accepts.
+\end{theorem}
+
+\begin{proof}
+  The binding operates through two mechanisms:
+
+  \smallskip\noindent\textbf{(a) Schnorr identity proof.}
+  The challenge includes the session ID:
+  $c = \hash_\ell(\texttt{"golden-pki-pok"} \,\|\, \sid \,\|\, \cdots)$.
+  A proof generated for $\sid'$ yields challenge $c' = \hash_\ell(\cdots
+  \sid' \cdots) \ne c$ (by collision resistance of $\hash_\ell$). The
+  verification equation $[s]\genbjj = K + [c]\pk_d$ fails since $c' \ne c$.
+
+  \smallskip\noindent\textbf{(b) eVRF pad domain separation.}
+  The LHL coefficient $\alpha = \hash_r(\texttt{"golden-lhl-alpha"} \,\|\,
+  \sid)$ and hash-to-curve inputs $\mathsf{sessData} = (\sid,
+  \mathsf{randomMsg})$ both include $\sid$. A replayed dealing would produce
+  different $H_1, H_2$ and $\alpha$ values, yielding a different pad
+  $\pad'_{d,j} \ne \pad_{d,j}$. The eVRF proof (bound to the original
+  $R_{d,j} = [\pad_{d,j}]\genbn$) will not verify against the recomputed
+  public inputs.
+\end{proof}
+
+% ── 8.3 ──────────────────────────────────────────────────────────────────────
+\subsection{Threshold Security}
+\label{sec:threshold}
+
+\begin{proposition}[Information-Theoretic Secrecy of Shares]
+  Any $t - 1$ or fewer Shamir shares of a degree-$(t-1)$ polynomial over $\Fr$
+  reveal no information about the constant term $\Omega = F(0)$. This is a
+  standard property of Shamir secret sharing~\cite{shamir1979}.
+\end{proposition}
+
+\begin{proposition}[Threshold Signing]
+  Any set of $t$ or more FROST signers can produce a valid Schnorr signature
+  verifiable against $\mathsf{GroupKey} = [\Omega]\genbn$. Any $t - 1$ or fewer
+  signers cannot produce a valid signature (under the discrete logarithm
+  assumption on $\Gbn$).
+\end{proposition}
+
+% ── 8.3.1 ─────────────────────────────────────────────────────────────────────
+\subsubsection{Robustness}
+\label{sec:robustness}
+
+The GOLDEN DKG provides \emph{verifiability} (any invalid dealing is detected
+and rejected) but does \textbf{not} provide \emph{robustness}---the guarantee
+that the protocol completes successfully even in the presence of malicious
+participants.
+
+Specifically, a single malicious dealer can prevent completion by broadcasting
+an invalid dealing that every honest verifier rejects. Since
+$\mathsf{Complete}$ requires exactly $n - 1$ verified peer dealings
+(one from each other participant), a missing or invalid dealing causes all
+honest participants to abort.
+
+\begin{remark}[Robustness vs.\ Complaint Mechanisms]
+  Achieving robustness typically requires a \emph{complaint round}
+  (as in GJKR~\cite{gjkr1999}), where participants identify and exclude
+  misbehaving dealers. GOLDEN's non-interactive design explicitly trades
+  robustness for a single-round protocol: adding a complaint mechanism would
+  require at least one additional interactive round, negating the main
+  advantage of the construction.
+
+  For applications requiring robustness, the recommended approach is to run
+  GOLDEN DKG optimistically and fall back to a multi-round protocol (e.g.,
+  GJKR or Pedersen DKG with complaints) if any dealing fails verification.
+  The application layer should verify the number of valid dealings and decide
+  whether to proceed (if $\ge t$ honest dealers produced valid dealings, the
+  secret can still be reconstructed from a subset) or to abort and re-run.
+\end{remark}
+
+% ── 8.4 ──────────────────────────────────────────────────────────────────────
+\subsection{Secret Material Lifecycle}
+\label{sec:secret-lifecycle}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Material} & \textbf{Created} & \textbf{Erased} \\
+\midrule
+$\omega_d$, $a_1, \ldots, a_{t-1}$ & Dealing & After share generation \\
+$\{s_j\}_{j \ne d}$ & Dealing & After encryption \\
+$\pad_{d,j}$ & Dealing / Completion & Immediately after use \\
+Schnorr nonce $\nu$ & Identity proof & After proof generation \\
+$\sk$ as \texttt{big.Int} + \texttt{skBytes} & PLONK witness & Word-level zeroing + \texttt{runtime.KeepAlive} \\
+Decrypted shares $\hat{s}_{d,i}$ & Completion & After accumulation \\
+$\mathsf{DkgDealing.PrivateShare}$ & Dealing & Caller invokes \texttt{DkgDealing.Zero()} \\
+$\mathsf{DkgDealing.DerivedPrivateShares}$ & Dealing & Caller invokes \texttt{DkgDealing.Zero()} \\
+$\mathsf{DkgDealing.RandomMsg}$ & Dealing & Caller invokes \texttt{DkgDealing.Zero()} (byte-by-byte) \\
+$\mathsf{padBytesCache}$ & Dealing / Completion & Byte-by-byte zeroing after derived share processing via explicit closure \\
+$\mathsf{DkgOutput.SecretShare}$ & Completion & Caller invokes \texttt{DkgOutput.Zero()} \\
+$\mathsf{DkgOutput.DerivedOutputs[*].SecretShare}$ & Completion & Caller invokes \texttt{DkgOutput.Zero()} \\
+FROST nonces $d_i, e_i$ & Signing Round 1 & After Round 2 (\texttt{defer}) \\
+\midrule
+\multicolumn{3}{@{}l}{\textit{Piggyback nonce preprocessing (Section~\ref{sec:piggyback})}} \\
+Pending nonce $(d^{\mathrm{next}}, e^{\mathrm{next}})$ & $\mathsf{PiggybackSign}$ / $\mathsf{BootstrapRound1}$ & Zeroed when consumed in next session (step~16 of Algorithm~\ref{alg:piggyback-sign}) \\
+Cloned nonce $(d^{\mathrm{clone}}, e^{\mathrm{clone}})$ & $\mathsf{PiggybackSign}$ step~15 & Zeroed by $\mathsf{SignRound2}$'s \texttt{defer} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{remark}[Go Memory Model Limitations]
+  \label{rem:go-zeroing}
+  All zeroing operations in the table above are \emph{best-effort} under the
+  Go memory model. Three fundamental limitations apply:
+
+  \begin{enumerate}[nosep]
+    \item \textbf{GC compaction.} Go's garbage collector may copy heap objects
+      during compaction, leaving stale copies of secret material in previously
+      occupied memory. The \texttt{runtime.KeepAlive} calls prevent collection
+      \emph{during} zeroing but cannot prevent prior copies.
+    \item \textbf{Dead-store elimination.} The Go compiler may optimize away
+      writes to variables that are not subsequently read.
+      \texttt{runtime.KeepAlive} is the standard countermeasure, but it is not
+      a formal guarantee against all compiler transformations.
+    \item \textbf{Stack spills.} Local scalar variables may be spilled to the
+      stack and not overwritten when the function returns.
+  \end{enumerate}
+
+  \noindent
+  For applications with stringent secret erasure requirements (e.g., FIPS
+  140-3), secrets should be allocated in non-GC-managed memory (e.g., via
+  \texttt{mmap} with \texttt{MADV\_DONTDUMP} and explicit \texttt{mlock}),
+  or the protocol should be implemented in a language with deterministic
+  memory management (C, Rust). The zeroing in the current Go implementation
+  represents the strongest practical mitigation available without
+  \texttt{cgo} or \texttt{unsafe}.
+\end{remark}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Protocol Data Flow}
+\label{sec:dataflow}
+
+Figure~\ref{fig:dataflow} illustrates the complete data flow from key
+generation through DKG to FROST signing.
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners, minimum width=3cm, minimum height=0.8cm,
+    text centered, font=\small},
+  arrow/.style={-{Stealth[length=3mm]}, thick},
+  dashedarrow/.style={-{Stealth[length=3mm]}, thick, dashed},
+  group/.style={draw, dashed, rounded corners, inner sep=8pt,
+    fill opacity=0.05, text opacity=1},
+  node distance=0.8cm
+]
+
+% BJJ column
+\node[box, fill=blue!10] (bjjkey) {$\sk_i \getsr \Fl$};
+\node[box, fill=blue!10, below=of bjjkey] (bjjpk) {$\pk_i = [\sk_i]\genbjj$};
+\node[box, fill=blue!10, below=of bjjpk] (dh) {$S = [\sk_d]\pk_j$};
+\node[box, fill=blue!10, below=of dh] (xext) {$\dhx = S.X \in \Fr$};
+\node[box, fill=blue!10, below=of xext] (h2c) {$H_1, H_2 \leftarrow \hashcurve(\mathsf{sessData})$};
+\node[box, fill=blue!10, below=of h2c] (vrf) {$P_k = [\dhx \bmod \ell] H_k$};
+
+% BN254 column (shifted right)
+\node[box, fill=red!10, right=3.5cm of bjjkey] (bn254key) {$\omega_d \getsr \Fr$};
+\node[box, fill=red!10, below=of bn254key] (poly) {$f_d(x) = \omega_d + \cdots$};
+\node[box, fill=red!10, below=of poly] (vsscom) {$A_k = [a_k]\genbn$};
+\node[box, fill=red!10, below=of vsscom] (shares) {$s_j = f_d(j) \in \Fr$};
+
+% Cross-field
+\node[box, fill=purple!10, below=3cm of shares] (lhl)
+  {$\pad = P_1.X + \alpha \cdot P_2.X$};
+\node[box, fill=red!10, below=of lhl] (encrypt) {$z = \pad + s_j$};
+\node[box, fill=red!10, below=of encrypt] (rcommit) {$R = [\pad]\genbn$};
+
+% ZK proof (center)
+\node[box, fill=green!10, below=0.8cm of rcommit]
+  (zkproof) {$\PLONK.\Prove(\mathsf{EVRFCircuit})$};
+
+% Completion
+\node[box, fill=orange!10, below=1cm of zkproof]
+  (complete) {$\mathsf{secretShare}_i = \sum_d f_d(i)$};
+\node[box, fill=orange!10, below=of complete]
+  (groupkey) {$\mathsf{GroupKey} = \sum_d [\omega_d]\genbn$};
+
+% FROST
+\node[box, fill=yellow!20, below=of groupkey]
+  (frost) {$\FROST.\mathsf{Sign}(m, \mathsf{KeyShare})$};
+\node[box, fill=yellow!20, below=of frost]
+  (sig) {$\sigma = (R, z)$};
+
+% Piggyback
+\node[box, fill=yellow!30, below=of sig]
+  (piggyback) {$\mathsf{PiggybackSign}$: $(z_i, D_i^{\mathrm{next}}, E_i^{\mathrm{next}})$};
+
+% Arrows
+\draw[arrow] (bjjkey) -- (bjjpk);
+\draw[arrow] (bjjpk) -- (dh);
+\draw[arrow] (dh) -- (xext);
+\draw[arrow] (xext) -- (h2c);
+\draw[arrow] (h2c) -- (vrf);
+\draw[arrow] (vrf) |- (lhl);
+
+\draw[arrow] (bn254key) -- (poly);
+\draw[arrow] (poly) -- (vsscom);
+\draw[arrow] (poly) -- (shares);
+\draw[arrow] (shares) |- (encrypt);
+
+\draw[arrow] (lhl) -- (encrypt);
+\draw[arrow] (lhl) -- (rcommit);
+\draw[dashedarrow] (rcommit) -- (zkproof);
+\draw[arrow] (encrypt) -- ++(0,-0.5) -| (complete);
+\draw[arrow] (vsscom) -- ++(2,0) |- (groupkey);
+\draw[arrow] (complete) -- (groupkey);
+\draw[arrow] (groupkey) -- (frost);
+\draw[arrow] (frost) -- (sig);
+\draw[arrow] (sig) -- (piggyback);
+\draw[arrow] (piggyback.east) -- ++(1.2,0) |- node[right, font=\scriptsize,
+  pos=0.25, text width=2.2cm, align=left] {steady-state\\(1 round)} (frost.east);
+
+% Group labels
+\node[above=0.1cm of bjjkey, font=\footnotesize\bfseries, blue!70] {BJJ ($\Gbj$)};
+\node[above=0.1cm of bn254key, font=\footnotesize\bfseries, red!70] {BN254 G1 ($\Gbn$)};
+
+\end{tikzpicture}
+\caption{Data flow from key generation through eVRF pad derivation,
+  share encryption, DKG completion, and FROST signing. Blue boxes
+  operate on BJJ, red boxes on BN254~G1, purple on the cross-field
+  boundary, green on the PLONK proof system, orange on aggregation,
+  and yellow on FROST signing.  The piggyback loop (bottom) shows the
+  steady-state 1-round path after bootstrap
+  (Section~\ref{sec:piggyback}).}
+\label{fig:dataflow}
+\end{figure}
+
+\begin{figure}[htbp]
+\centering
+\begin{tikzpicture}[
+  party/.style={draw, minimum width=2.2cm, minimum height=0.6cm,
+    font=\small\bfseries, rounded corners},
+  msg/.style={-{Stealth[length=2.5mm]}, thick},
+  note/.style={font=\footnotesize, text width=3cm, align=center},
+  timeline/.style={thick, dashed, gray},
+  node distance=0.5cm
+]
+
+% Party headers
+\node[party, fill=blue!15] (p1) at (0,0) {Party 1};
+\node[party, fill=red!15] (p2) at (5,0) {Party 2};
+\node[party, fill=green!15] (p3) at (10,0) {Party 3};
+
+% Timelines
+\draw[timeline] (0,-0.5) -- (0,-12.0);
+\draw[timeline] (5,-0.5) -- (5,-12.0);
+\draw[timeline] (10,-0.5) -- (10,-12.0);
+
+% Phase 1: CreateDealing
+\node[font=\footnotesize\itshape, gray] at (-2.2,-1.0) {CreateDealing};
+\node[note] at (0,-1.0) {\footnotesize $\mathsf{msg}_1$};
+\node[note] at (5,-1.0) {\footnotesize $\mathsf{msg}_2$};
+\node[note] at (10,-1.0) {\footnotesize $\mathsf{msg}_3$};
+
+% Broadcast arrows (Round 0)
+\draw[msg] (0,-1.5) -- node[above, font=\scriptsize] {$\mathsf{msg}_1$} (5,-2.2);
+\draw[msg] (0,-1.5) -- node[above, font=\scriptsize, pos=0.3] {} (10,-2.5);
+\draw[msg] (5,-1.5) -- node[above, font=\scriptsize] {$\mathsf{msg}_2$} (0,-2.2);
+\draw[msg] (5,-1.5) -- node[above, font=\scriptsize] {} (10,-2.2);
+\draw[msg] (10,-1.5) -- node[above, font=\scriptsize, pos=0.7] {$\mathsf{msg}_3$} (0,-2.5);
+\draw[msg] (10,-1.5) -- node[above, font=\scriptsize] {} (5,-2.5);
+
+% Phase label
+\draw[thick, dotted] (-3,-3.0) -- (12,-3.0);
+\node[font=\footnotesize\itshape, gray] at (-2.2,-3.5) {VerifyDealing};
+
+% Verify arrows (self-loops)
+\draw[msg, blue!60] (0,-3.3) -- (0,-4.5)
+  node[midway, left, font=\scriptsize, text width=2cm, align=right]
+  {verify $\mathsf{msg}_2$, $\mathsf{msg}_3$};
+\draw[msg, red!60] (5,-3.3) -- (5,-4.5)
+  node[midway, left, font=\scriptsize, text width=2cm, align=right]
+  {verify $\mathsf{msg}_1$, $\mathsf{msg}_3$};
+\draw[msg, green!60] (10,-3.3) -- (10,-4.5)
+  node[midway, right, font=\scriptsize, text width=2cm, align=left]
+  {verify $\mathsf{msg}_1$, $\mathsf{msg}_2$};
+
+% Phase label
+\draw[thick, dotted] (-3,-5.0) -- (12,-5.0);
+\node[font=\footnotesize\itshape, gray] at (-2.2,-5.5) {Complete};
+
+% Complete
+\draw[msg, blue!60] (0,-5.3) -- (0,-6.5)
+  node[midway, left, font=\scriptsize, text width=2.5cm, align=right]
+  {aggregate shares, compute group key};
+\draw[msg, red!60] (5,-5.3) -- (5,-6.5)
+  node[midway, left, font=\scriptsize] {};
+\draw[msg, green!60] (10,-5.3) -- (10,-6.5)
+  node[midway, right, font=\scriptsize] {};
+
+% Output
+\node[font=\scriptsize, blue!70] at (0,-7.0) {$(\mathsf{GK}, \mathsf{sk}_1, \ldots)$};
+\node[font=\scriptsize, red!70] at (5,-7.0) {$(\mathsf{GK}, \mathsf{sk}_2, \ldots)$};
+\node[font=\scriptsize, green!70] at (10,-7.0) {$(\mathsf{GK}, \mathsf{sk}_3, \ldots)$};
+
+% Phase label
+\draw[thick, dotted] (-3,-7.5) -- (12,-7.5);
+\node[font=\footnotesize\itshape, gray] at (-2.2,-8.0) {FROST Sign};
+
+% FROST
+\node[font=\scriptsize] at (5,-8.3) {$t$-of-$n$ threshold signing};
+\node[font=\scriptsize] at (5,-8.8) {$\sigma = (R, z)$};
+
+% Phase label
+\draw[thick, dotted] (-3,-9.3) -- (12,-9.3);
+\node[font=\footnotesize\itshape, gray] at (-2.2,-9.8) {Piggyback};
+
+% Piggyback bootstrap
+\node[font=\scriptsize] at (5,-10.1) {Bootstrap: 2-round FROST (one-time)};
+
+% Piggyback steady-state
+\draw[msg, orange!80] (0,-10.5) -- node[above, font=\scriptsize] {$(z_1, D_1^{\mathrm{next}}, E_1^{\mathrm{next}})$} (5,-11.0);
+\draw[msg, orange!80] (5,-10.5) -- node[above, font=\scriptsize] {$(z_2, D_2^{\mathrm{next}}, E_2^{\mathrm{next}})$} (10,-11.0);
+\draw[msg, orange!80] (10,-10.5) -- node[above, font=\scriptsize, pos=0.7] {$(z_3, \ldots)$} (0,-11.0);
+
+\node[font=\scriptsize] at (5,-11.5) {Steady-state: 1 round per session};
+
+\end{tikzpicture}
+\caption{Protocol sequence diagram for a 3-party GOLDEN DKG ($n = 3$). Each
+  party broadcasts a \textsf{Round0Msg}, all parties verify all received
+  dealings, then each party completes independently. The resulting key shares
+  are used for FROST threshold signing.  After a 2-round bootstrap, piggyback
+  nonce preprocessing (Section~\ref{sec:piggyback}) enables 1-round
+  steady-state signing.}
+\label{fig:sequence}
+\end{figure}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Implementation Notes}
+\label{sec:impl}
+
+\subsection{Scalar Representations}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}llp{6cm}@{}}
+\toprule
+\textbf{Group} & \textbf{Scalar Type} & \textbf{Internal Representation} \\
+\midrule
+BJJ & \texttt{big.Int} & Arbitrary-precision integer, arithmetic mod $\ell$ \\
+BN254 G1 & \texttt{fr.Element} & Montgomery form, $[4]\texttt{uint64}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The Montgomery representation of BN254 scalars stores $a \cdot 2^{256} \bmod r$
+rather than $a$ directly, enabling efficient modular multiplication via
+Montgomery reduction. Serialization to bytes (for hashing, transmission, or
+cross-field conversion) always produces the canonical integer representation.
+
+\subsection{Point Representations}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Group} & \textbf{Affine} & \textbf{Intermediate} \\
+\midrule
+BJJ & \texttt{twistededwards.PointAffine} $(x, y)$ & Same (no projective) \\
+BN254 G1 & \texttt{bn254.G1Affine} $(X, Y)$ & \texttt{G1Jac} for additions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+BN254 G1 uses Jacobian coordinates $(X:Y:Z)$ internally for point addition
+(avoiding field inversions), converting to affine only for serialization and
+equality checks.
+
+\subsection{Circuit Constraint Count}
+
+The eVRF circuit compiles to approximately $238{,}000$ constraints. The
+dominant costs are:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lr@{}}
+\toprule
+\textbf{Operation} & \textbf{Approx.\ Constraints} \\
+\midrule
+3 BJJ ScalarMul (native, $\sim$251-bit) & $3 \times 2{,}000 \approx 6{,}000$ \\
+254-bit decomposition & $\sim 500$ \\
+1 BN254 G1 ScalarMulBase (emulated) & $\sim 200{,}000$ \\
+4 AssertIsOnCurve (BJJ, native) & $\sim 50$ \\
+1 BN254 G1 AssertIsEqual (emulated) & $\sim 30{,}000$ \\
+\midrule
+\textbf{Total} & $\sim 238{,}000$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The emulated BN254 G1 operations dominate because each $\Fp'$ multiplication
+requires multiple native $\Fr$ multiplications to simulate arithmetic in a
+non-native field.
+
+\subsection{Proof Size and Timing}
+
+\begin{itemize}[nosep]
+  \item PLONK proof size: $\sim 600$ bytes (bounded by \texttt{maxProofSize} $= 2048$).
+    Proof size is validated against this bound during verification; oversized
+    proofs are rejected before deserialization.
+  \item Proof generation: $\sim 3$ seconds per proof (single-threaded).
+  \item Proof verification: $\sim 10$ milliseconds.
+  \item Per-dealing overhead: $n - 1$ proofs generated (one per recipient).
+\end{itemize}
+
+\subsection{CurveSuite Abstraction}
+\label{sec:curvesuite}
+
+The protocol logic is parameterized by a \texttt{CurveSuite} interface that
+abstracts all curve-pair-specific operations. Implementing this interface for
+a new curve pair (e.g., BLS12-381/JubJub) enables the GOLDEN DKG to operate
+on different curve combinations without modifying the protocol code.
+
+The interface requires the following methods:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}lp{8cm}@{}}
+\toprule
+\textbf{Method} & \textbf{Description} \\
+\midrule
+\texttt{InnerGroup() Group} & Returns the DH/identity curve group (e.g., BJJ). \\
+\texttt{OuterGroup() Group} & Returns the commitment/VSS curve group (e.g., BN254 G1). \\
+\texttt{H1(data ...[]byte) (Point, error)} & Hash-to-curve on the inner curve, domain 1. Result must be in the prime-order subgroup. \\
+\texttt{H2(data ...[]byte) (Point, error)} & Hash-to-curve on the inner curve, domain 2. Independent from H1 (different domain separator). \\
+\texttt{ExtractXAsOuterScalar(Point) (Scalar, error)} & Extract the x-coordinate of an inner-curve point and interpret it as an outer-group scalar. \\
+\texttt{OuterToInnerScalar(Scalar) (Scalar, error)} & Convert an outer-group scalar to an inner-group scalar (reduction mod inner-group order). \\
+\texttt{GenerateEVRFProof(...) ([]byte, error)} & Generate a ZK proof for eVRF pad derivation. Parameters: dealer SK, dealer PK, recipient PK, session data, $\alpha$, pad result. \\
+\texttt{VerifyEVRFProof(...) error} & Verify a ZK proof for eVRF pad derivation. Parameters: dealer PK, recipient PK, session data, $\alpha$, R commitment, proof bytes. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+A new curve pair must satisfy the field relationship~\eqref{eq:fieldrel}
+(inner base field $=$ outer scalar field) to enable native in-circuit
+arithmetic. The H1/H2 functions must produce independent outputs for identical
+inputs (via distinct domain separators) and return points in the prime-order
+subgroup of the inner curve.
+
+\subsection{Code Step Numbering}
+\label{sec:step-numbering}
+
+\begin{remark}
+  The implementation's internal step numbering (visible in code comments) starts
+  from the first cryptographic operation, after input validation. This creates
+  an offset of approximately 1 from the Algorithm line numbers in this document.
+  For example, ``Step~1'' in the code (sampling $\omega$) corresponds to
+  Algorithm~\ref{alg:dealing}, line~3.
+\end{remark}
+
+\subsection{Error Sentinel Catalog}
+\label{sec:errors}
+
+The implementation defines 28~sentinel errors for structured error handling.
+The following table documents each error and its trigger condition:
+
+\begin{center}
+\renewcommand{\arraystretch}{1.15}
+\footnotesize
+\begin{tabular}{@{}lp{7.5cm}@{}}
+\toprule
+\textbf{Error} & \textbf{Condition} \\
+\midrule
+\texttt{ErrInvalidNodeID} & Node ID not in $[1, \mathtt{MaxNodeID}]$ \\
+\texttt{ErrInvalidConfig} & $T < 2$ or $N < T$ \\
+\texttt{ErrDuplicateNodeID} & Duplicate participant ID detected \\
+\texttt{ErrPeerCountMismatch} & Peer count $\ne N - 1$ \\
+\texttt{ErrSessionIDMismatch} & Dealing session ID $\ne$ config session ID \\
+\texttt{ErrIdentityPoint} & Point is the identity (degenerate) \\
+\texttt{ErrCiphertextVerification} & $[z]\genbn \ne R + \VSS(j)$ \\
+\texttt{ErrDegenerateDH} & DH shared secret is identity point \\
+\texttt{ErrIdentityProofFailed} & Schnorr PoK verification failed \\
+\texttt{ErrEVRFProofFailed} & PLONK eVRF proof verification failed \\
+\texttt{ErrHashToCurveFailed} & Hash-to-curve exhausted 256 attempts \\
+\texttt{ErrInvalidVSSLength} & $|\mathbf{A}| \ne T$ \\
+\texttt{ErrMissingCiphertext} & Expected recipient has no ciphertext \\
+\texttt{ErrMissingEVRFProof} & Expected recipient has no eVRF proof \\
+\texttt{ErrDealerSelfCiphertext} & Dealer included ciphertext for self \\
+\texttt{ErrIdentityRCommitment} & R commitment is identity point \\
+\texttt{ErrDuplicateDealing} & Duplicate dealing from same dealer \\
+\texttt{ErrUnknownDealer} & Dealing from unknown participant \\
+\texttt{ErrSelfDealing} & Received own dealing in peer dealings \\
+\texttt{ErrProofTooLarge} & Proof exceeds \texttt{maxProofSize} \\
+\texttt{ErrNodeIDExceedsN} & Node ID $> N$ \\
+\texttt{ErrExtraCiphertexts} & Extra ciphertexts beyond expected set \\
+\texttt{ErrExtraEVRFProofs} & Extra eVRF proofs beyond expected set \\
+\texttt{ErrNilIdentityProof} & Nil identity proof in dealing \\
+\texttt{ErrNilCiphertext} & Nil ciphertext entry in dealing \\
+\texttt{ErrNilSuite} & Nil CurveSuite passed to function \\
+\texttt{ErrDerivedCurveCountMismatch} & Derived curve count $\ne$ config \\
+\texttt{ErrDerivedCiphertextVerification} & Derived ciphertext check failed \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Comparison with Standard FROST DKG}
+\label{sec:comparison}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.3}
+\begin{tabular}{@{}llll@{}}
+\toprule
+\textbf{Property} & \textbf{FROST DKG (Pedersen)} & \textbf{GJKR}~\cite{gjkr1999} & \textbf{GOLDEN DKG} \\
+\midrule
+Rounds & 2 (bcast + private) & 2 (bcast + private) & 1 (broadcast only) \\
+Secure channels & Required & Required & Not required \\
+Share encryption & Secure channel & Secure channel & eVRF-derived pads \\
+ZK proofs & None & None & PLONK per recipient \\
+Adaptive security & No & Yes (erasure model) & No \\
+Identity curve & Same as signing & Same as signing & Separate (BJJ) \\
+Signing curve & Single curve & Single curve & BN254 G1 \\
+Msg size / dealer & $\bigO(n)$ & $\bigO(n)$ & $\bigO(n)$ ct + proofs \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\medskip
+\noindent\textbf{Cost discussion.}
+Each dealer generates $n - 1$ PLONK proofs, giving $n(n - 1) = \bigO(n^2)$
+total proofs across all dealers. Each verifier checks all $n - 1$ proofs in
+each of the $n - 1$ peer dealings, for $\bigO(n^2)$ verifications per party.
+At ${\sim}3$~seconds per proof and ${\sim}10$~ms per verification, the protocol
+is practical for $n \le 20$ (about 60 proofs per dealer, ${\sim}3$~minutes
+generation time with single-threaded proving). Parallelizing proof generation
+across cores or machines can extend this to larger groups.
+
+The key trade-off is that GOLDEN eliminates the need for secure point-to-point
+channels at the cost of PLONK proof generation per recipient. For applications
+where establishing secure channels is expensive or impractical (e.g.,
+blockchain-based DKG with broadcast-only communication), the GOLDEN approach is
+advantageous.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\section{Conclusion}
+\label{sec:conclusion}
+
+We have presented a complete specification of the GOLDEN non-interactive DKG
+protocol adapted to BN254/Baby~Jubjub. The construction exploits the algebraic
+identity between BJJ's base field and BN254's scalar field to build an
+efficient eVRF pad derivation mechanism, proved correct via gnark PLONK
+zero-knowledge proofs. The resulting key shares integrate seamlessly with the
+FROST threshold Schnorr signing protocol.
+
+The implementation provides the following guarantees:
+\begin{itemize}[nosep]
+  \item Non-interactive dealing via a single broadcast message per participant.
+  \item Verifiable share encryption via Feldman VSS consistency checks and eVRF proofs.
+  \item Session-bound identity proofs preventing cross-session replay.
+  \item Information-theoretic secrecy of shares against $t-1$ corruptions.
+  \item Direct FROST compatibility for threshold Schnorr signatures.
+  \item Piggyback nonce preprocessing for 1-round steady-state signing after a one-time 2-round bootstrap (Section~\ref{sec:piggyback}).
+  \item Multi-curve derived shares from a single DKG execution (Section~\ref{sec:derived}).
+  \item Curve-agnostic protocol via the \texttt{CurveSuite} abstraction (Section~\ref{sec:curvesuite}).
+  \item Systematic secure erasure of all intermediate secret material.
+\end{itemize}
+
+The production KZG SRS is sourced from the Aztec Ignition ceremony (176
+participants); see Remark~\ref{rem:srs} for the integrity verification
+procedure. The hash-to-curve construction should be evaluated for the target
+threat model's timing requirements.
+
+% ══════════════════════════════════════════════════════════════════════════════
+\begin{thebibliography}{10}
+
+\bibitem{golden2025}
+  B.~B\"unz, Y.~Choi, and C.~Komlo.
+  GOLDEN: Non-Interactive DKG.
+  \emph{IACR ePrint Archive}, Report 2025/1924, 2025.
+
+\bibitem{feldman1987}
+  P.~Feldman.
+  A practical scheme for non-interactive verifiable secret sharing.
+  In \emph{FOCS}, pages 427--437, 1987.
+
+\bibitem{shamir1979}
+  A.~Shamir.
+  How to share a secret.
+  \emph{Communications of the ACM}, 22(11):612--613, 1979.
+
+\bibitem{rfc9591}
+  D.~Connolly, C.~Komlo, I.~Goldberg, and C.~A.~Wood.
+  The Flexible Round-Optimized Schnorr Threshold (FROST) Protocol for
+  Two-Round Schnorr Signatures.
+  RFC~9591, Internet Engineering Task Force, June 2024.
+
+\bibitem{gabizon2019}
+  A.~Gabizon, Z.~J.~Williamson, and O.~Ciobotaru.
+  PLONK: Permutations over Lagrange-bases for Oecumenical Noninteractive
+  arguments of Knowledge.
+  \emph{IACR ePrint Archive}, Report 2019/953, 2019.
+
+\bibitem{gnark}
+  ConsenSys.
+  gnark: a fast zk-SNARK library.
+  \url{https://github.com/Consensys/gnark}, 2020--2026.
+
+\bibitem{lefkovits2017}
+  B.~Whitehat, M.~Bellés, and J.~Baylina.
+  Baby Jubjub Elliptic Curve.
+  EIP-2494, Ethereum Improvement Proposals, 2020.
+
+\bibitem{schwartz1980}
+  J.~T.~Schwartz.
+  Fast probabilistic algorithms for verification of polynomial identities.
+  \emph{Journal of the ACM}, 27(4):701--717, 1980.
+
+\bibitem{aztec-ignition}
+  Aztec Protocol.
+  Aztec Ignition: A Multi-Party Computation Ceremony for BN254.
+  \url{https://github.com/AztecProtocol/ignition-verification}, 2019.
+
+\bibitem{gjkr1999}
+  R.~Gennaro, S.~Jarecki, H.~Krawczyk, and T.~Rabin.
+  Secure distributed key generation for discrete-log based cryptosystems.
+  In \emph{EUROCRYPT}, pages 295--310, 1999.
+
+\bibitem{dodis2008}
+  Y.~Dodis, R.~Ostrovsky, L.~Reyzin, and A.~Smith.
+  Fuzzy extractors: How to generate strong keys from biometrics and other
+  noisy data.
+  \emph{SIAM Journal on Computing}, 38(1):97--139, 2008.
+
+\bibitem{ill1989}
+  R.~Impagliazzo, L.~Levin, and M.~Luby.
+  Pseudo-random generation from one-way functions.
+  In \emph{STOC}, pages 12--24, 1989.
+
+\bibitem{kb2016}
+  T.~Kim and R.~Barbulescu.
+  Extended tower number field sieve: A new complexity for the medium prime
+  case.
+  In \emph{CRYPTO}, pages 543--571, 2016.
+
+\end{thebibliography}
+
+\end{document}

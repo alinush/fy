@@ -1,10 +1,12 @@
 package frost
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"io"
 	"math"
+	"slices"
 
 	"github.com/f3rmion/fy/group"
 )
@@ -70,6 +72,7 @@ func (f *FROST) SignRound1(r io.Reader, share *KeyShare) (*SigningNonce, *Signin
 	}
 	e, err := f.group.RandomScalar(r)
 	if err != nil {
+		d.Zero()
 		return nil, nil, err
 	}
 	// Defense-in-depth: verify nonces are non-zero.
@@ -100,6 +103,9 @@ func (f *FROST) SignRound1(r io.Reader, share *KeyShare) (*SigningNonce, *Signin
 //
 // The commitments slice must include commitments from all signers participating
 // in this signing session (at least threshold signers).
+//
+// The nonce is consumed regardless of success or failure. After calling
+// SignRound2, a new [FROST.SignRound1] call is required for retry.
 func (f *FROST) SignRound2(
 	share *KeyShare,
 	nonce *SigningNonce,
@@ -177,6 +183,12 @@ func (f *FROST) SignRound2(
 	lambdaS := f.group.NewScalar().Mul(lambda, share.SecretKey) // lambda * s
 	lambdaSC := f.group.NewScalar().Mul(lambdaS, c)             // lambda * s * c
 	z = f.group.NewScalar().Add(z, lambdaSC)                    // d + rho*e + lambda*s*c
+
+	// Zero secret intermediates that encode key share structure.
+	lambda.Zero()
+	lambdaS.Zero()
+	lambdaSC.Zero()
+	c.Zero()
 
 	return &SignatureShare{
 		ID: share.ID,
@@ -272,6 +284,11 @@ func (f *FROST) AggregateWithVerification(
 //
 // All signature shares must be from the same signing session (same message
 // and commitments).
+//
+// WARNING: Aggregate does not verify individual signature shares. Use
+// [FROST.AggregateWithVerification] to prevent rogue-key attacks from
+// malicious signers. Only use Aggregate when shares have been independently
+// verified via [FROST.VerifyShare].
 func (f *FROST) Aggregate(
 	message []byte,
 	commitments []*SigningCommitment,
@@ -289,6 +306,15 @@ func (f *FROST) Aggregate(
 	if err := validateCommitments(commitments); err != nil {
 		return nil, err
 	}
+	// Zero all signature share Z values on exit to prevent memory residue.
+	defer func() {
+		for _, s := range shares {
+			if s.Z != nil {
+				s.Z.Zero()
+			}
+		}
+	}()
+
 	// Validate commitment IDs are unique, then match share IDs against them
 	commitIDs := make(map[string]bool)
 	for _, c := range commitments {
@@ -390,7 +416,14 @@ func (f *FROST) VerifyShare(
 	cLambdaPK := f.group.NewPoint().ScalarMult(lambdaC, publicKey)
 	rhs := f.group.NewPoint().Add(Ri, cLambdaPK)
 
-	return lhs.Equal(rhs), nil
+	result := lhs.Equal(rhs)
+
+	// Zero secret intermediates.
+	lambda.Zero()
+	c.Zero()
+	lambdaC.Zero()
+
+	return result, nil
 }
 
 // Verify checks whether a FROST signature is valid for the given message
@@ -404,6 +437,10 @@ func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) boo
 	}
 	// Reject identity R per RFC 9591 Section 5.5
 	if sig.R.IsIdentity() {
+		return false
+	}
+	// Reject zero Z to prevent trivial forgeries.
+	if sig.Z.IsZero() {
 		return false
 	}
 	// c = H2(R, GroupKey, message)
@@ -423,14 +460,23 @@ func (f *FROST) Verify(message []byte, sig *Signature, groupKey group.Point) boo
 //
 //	4-byte len || ID || 4-byte len || HidingPoint || 4-byte len || BindingPoint
 //
+// Per RFC 9591, commitments are sorted by signer identifier to ensure
+// deterministic encoding regardless of input order.
 // Length-prefixing prevents ambiguous concatenation boundaries (per FROST RFC).
 func (f *FROST) encodeCommitments(commitments []*SigningCommitment) []byte {
+	// Sort a copy by signer ID for deterministic encoding (RFC 9591).
+	sorted := make([]*SigningCommitment, len(commitments))
+	copy(sorted, commitments)
+	slices.SortFunc(sorted, func(a, b *SigningCommitment) int {
+		return bytes.Compare(a.ID.Bytes(), b.ID.Bytes())
+	})
+
 	var commBytes []byte
 	// Prepend commitment count per FROST RFC recommendation.
 	var countBuf [4]byte
 	binary.BigEndian.PutUint32(countBuf[:], uint32(len(commitments)))
 	commBytes = append(commBytes, countBuf[:]...)
-	for _, c := range commitments {
+	for _, c := range sorted {
 		commBytes = appendLengthPrefixed(commBytes, c.ID.Bytes())
 		commBytes = appendLengthPrefixed(commBytes, c.HidingPoint.Bytes())
 		commBytes = appendLengthPrefixed(commBytes, c.BindingPoint.Bytes())

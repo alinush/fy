@@ -2,6 +2,8 @@ package session
 
 import (
 	"errors"
+	"fmt"
+	"sync"
 
 	"github.com/f3rmion/fy/dkls23/dkg"
 	"github.com/f3rmion/fy/dkls23/sign"
@@ -11,6 +13,7 @@ import (
 // DKLS23Participant manages a single participant's state throughout DKLS23 DKG
 // and signing ceremonies. Create instances using [NewDKLS23Participant].
 type DKLS23Participant struct {
+	mu        sync.Mutex
 	index     uint8
 	threshold uint8
 	total     uint8
@@ -108,12 +111,16 @@ func NewDKLS23Participant(threshold, total, index uint8, sessionID []byte) (*DKL
 
 // Index returns this participant's identifier.
 func (p *DKLS23Participant) Index() uint8 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.index
 }
 
 // Party returns the signing party after DKG completion.
 // Returns nil if DKG has not been finalized.
 func (p *DKLS23Participant) Party() *sign.Party {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.party
 }
 
@@ -122,6 +129,9 @@ func (p *DKLS23Participant) Party() *sign.Party {
 // This creates polynomial evaluations for all participants. Send
 // PolyPoints[j-1] to party j.
 func (p *DKLS23Participant) DKGPhase1() (*DKLS23DKGPhase1Output, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgPhase != 0 {
 		return nil, errors.New("DKG phase 1 already completed")
 	}
@@ -133,8 +143,12 @@ func (p *DKLS23Participant) DKGPhase1() (*DKLS23DKGPhase1Output, error) {
 	p.phase1Output = phase1Out
 	p.dkgPhase = 1
 
+	// Return a copy of PolyPoints to prevent callers from mutating internal state.
+	pts := make([]group.Scalar, len(p.phase1Output.PolyPoints))
+	copy(pts, p.phase1Output.PolyPoints)
+
 	return &DKLS23DKGPhase1Output{
-		PolyPoints: p.phase1Output.PolyPoints,
+		PolyPoints: pts,
 	}, nil
 }
 
@@ -145,8 +159,16 @@ func (p *DKLS23Participant) DKGPhase1() (*DKLS23DKGPhase1Output, error) {
 //     evaluation for this participant. Must include evaluations from all
 //     other participants.
 func (p *DKLS23Participant) DKGPhase2(receivedPolyPoints map[uint8]group.Scalar) (*DKLS23DKGPhase2Output, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgPhase != 1 {
 		return nil, errors.New("must complete DKG phase 1 before phase 2")
+	}
+
+	// Validate that we received polynomial points from exactly the other participants.
+	if len(receivedPolyPoints) != int(p.total)-1 {
+		return nil, fmt.Errorf("expected %d polynomial points, got %d", p.total-1, len(receivedPolyPoints))
 	}
 
 	// Collect polynomial fragments: our own + received from others
@@ -188,6 +210,9 @@ func (p *DKLS23Participant) DKGPhase2(receivedPolyPoints map[uint8]group.Scalar)
 
 // DKGPhase3 executes DKG phase 3: reveal zero seeds and initialize multiplication.
 func (p *DKLS23Participant) DKGPhase3() (*DKLS23DKGPhase3Output, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgPhase != 2 {
 		return nil, errors.New("must complete DKG phase 2 before phase 3")
 	}
@@ -221,6 +246,9 @@ func (p *DKLS23Participant) DKGPhase3() (*DKLS23DKGPhase3Output, error) {
 // After this call, the participant is ready for signing operations.
 // Use [Party] to get the signing party.
 func (p *DKLS23Participant) DKGPhase4(input *DKLS23DKGPhase4Input) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.dkgPhase != 3 {
 		return errors.New("must complete DKG phase 3 before phase 4")
 	}
@@ -247,13 +275,20 @@ func (p *DKLS23Participant) DKGPhase4(input *DKLS23DKGPhase4Input) error {
 	p.phase1Output = nil
 	p.phase2Output = nil
 	p.phase3Output = nil
+	p.dkgData = nil
 
 	return nil
 }
 
 // SetParty allows setting a previously-saved signing party.
 // Use this when restoring a participant from persistent storage.
-func (p *DKLS23Participant) SetParty(party *sign.Party) {
+func (p *DKLS23Participant) SetParty(party *sign.Party) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if party == nil {
+		return errors.New("party cannot be nil")
+	}
 	p.party = party
 	p.dkgPhase = 4
+	return nil
 }

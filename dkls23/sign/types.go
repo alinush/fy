@@ -1,5 +1,3 @@
-// Package sign implements the DKLs23 signing protocol.
-// This is Protocol 3.6 from https://eprint.iacr.org/2023/765.pdf
 package sign
 
 import (
@@ -110,6 +108,58 @@ type Signature struct {
 	RecoveryID uint8
 }
 
+// Zero securely erases secret scalar material in UniqueKeep1to2.
+func (k *UniqueKeep1to2) Zero() {
+	if k.InstanceKey != nil {
+		k.InstanceKey.Zero()
+	}
+	if k.InversionMask != nil {
+		k.InversionMask.Zero()
+	}
+	if k.Zeta != nil {
+		k.Zeta.Zero()
+	}
+}
+
+// Zero securely erases secret scalar material in UniqueKeep2to3.
+func (k *UniqueKeep2to3) Zero() {
+	if k.InstanceKey != nil {
+		k.InstanceKey.Zero()
+	}
+	if k.InversionMask != nil {
+		k.InversionMask.Zero()
+	}
+	if k.KeyShare != nil {
+		k.KeyShare.Zero()
+	}
+}
+
+// Zero securely erases secret scalar material in Phase1ToPhase2Keep.
+func (k *Phase1ToPhase2Keep) Zero() {
+	if k.Chi != nil {
+		k.Chi.Zero()
+	}
+	if k.MulKeep != nil {
+		k.MulKeep.Zero()
+	}
+}
+
+// Zero securely erases secret scalar material in Phase2ToPhase3Keep.
+func (k *Phase2ToPhase3Keep) Zero() {
+	if k.CU != nil {
+		k.CU.Zero()
+	}
+	if k.CV != nil {
+		k.CV.Zero()
+	}
+	if k.Chi != nil {
+		k.Chi.Zero()
+	}
+	if k.MulKeep != nil {
+		k.MulKeep.Zero()
+	}
+}
+
 // ComputeZeroShare computes the party's share of zero for the given counterparties
 func (p *Party) ComputeZeroShare(counterparties []uint8, sessionID []byte) group.Scalar {
 	share := dkls23.NewScalar()
@@ -137,4 +187,26 @@ func (p *Party) ComputeZeroShare(counterparties []uint8, sessionID []byte) group
 		}
 	}
 	return share
+}
+
+// Zero securely erases secret material in the Party.
+func (p *Party) Zero() {
+	if p.KeyShare != nil {
+		p.KeyShare.Zero()
+	}
+	for _, seed := range p.ZeroSeeds {
+		for i := range seed.Seed {
+			seed.Seed[i] = 0
+		}
+	}
+	for _, s := range p.MulSenders {
+		if s != nil && s.OTESender != nil {
+			s.OTESender.Zero()
+		}
+	}
+	for _, r := range p.MulReceivers {
+		if r != nil && r.OTEReceiver != nil {
+			r.OTEReceiver.Zero()
+		}
+	}
 }

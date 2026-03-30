@@ -2,15 +2,25 @@ package bjj
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
 
 	"github.com/consensys/gnark-crypto/ecc/bn254/twistededwards"
 	"github.com/f3rmion/fy/group"
 )
+
+// SECURITY NOTE: Scalar operations use math/big which is NOT constant-time.
+// This means Add, Sub, Mul, Negate, Invert, Equal, and IsZero have
+// data-dependent timing. For protocols requiring constant-time scalar
+// arithmetic (e.g., threshold signing over BJJ), consider using
+// gnark-crypto's fr.Element directly, which provides constant-time
+// Montgomery arithmetic. The point operations (ScalarMult) delegate to
+// gnark-crypto and ARE constant-time.
 
 // curveOrder is the Baby Jubjub subgroup order.
 // This is distinct from the BN254 scalar field order (Fr).
@@ -20,6 +30,13 @@ func init() {
 	curve := twistededwards.GetEdwardsCurve()
 	curveOrder = new(big.Int).Set(&curve.Order)
 }
+
+// Compile-time interface checks.
+var (
+	_ group.Group  = (*BJJ)(nil)
+	_ group.Scalar = (*Scalar)(nil)
+	_ group.Point  = (*Point)(nil)
+)
 
 // Scalar represents an element of the Baby Jubjub scalar field.
 // It implements [group.Scalar] using big.Int with modular arithmetic
@@ -120,14 +137,13 @@ func (s *Scalar) Set(a group.Scalar) group.Scalar {
 }
 
 // Bytes returns the scalar as a 32-byte big-endian representation.
+// Reduces into a temporary to avoid mutating the receiver.
 func (s *Scalar) Bytes() []byte {
-	// Ensure scalar is reduced before serialization
-	s.reduce()
-	bytes := s.inner.Bytes()
+	reduced := new(big.Int).Mod(s.inner, curveOrder)
+	bytes := reduced.Bytes()
 	if len(bytes) >= 32 {
 		return bytes[:32]
 	}
-	// Pad with leading zeros
 	padded := make([]byte, 32)
 	copy(padded[32-len(bytes):], bytes)
 	return padded
@@ -137,6 +153,9 @@ func (s *Scalar) Bytes() []byte {
 // The value is reduced modulo the curve order.
 // Input must be at most 64 bytes (allowing hash-to-field with 128-bit security margin).
 func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty scalar data")
+	}
 	if len(data) > 64 {
 		return nil, errors.New("scalar input exceeds 64 bytes")
 	}
@@ -146,18 +165,16 @@ func (s *Scalar) SetBytes(data []byte) (group.Scalar, error) {
 }
 
 // Equal reports whether s and b represent the same scalar value.
+// Uses constant-time comparison on the byte representations.
 func (s *Scalar) Equal(b group.Scalar) bool {
-	bScalar := assertScalar(b)
-	// Reduce both operands into temporaries to avoid mutating either.
-	sReduced := new(big.Int).Mod(s.inner, curveOrder)
-	bReduced := new(big.Int).Mod(bScalar.inner, curveOrder)
-	return sReduced.Cmp(bReduced) == 0
+	return subtle.ConstantTimeCompare(s.Bytes(), b.Bytes()) == 1
 }
 
 // IsZero reports whether s is the zero scalar.
+// Uses constant-time comparison against a zero byte slice.
 func (s *Scalar) IsZero() bool {
-	s.reduce()
-	return s.inner.Sign() == 0
+	zero := make([]byte, 32)
+	return subtle.ConstantTimeCompare(s.Bytes(), zero) == 1
 }
 
 // Zero sets the scalar to zero and securely erases the previous value from
@@ -168,6 +185,7 @@ func (s *Scalar) Zero() {
 	for i := range words {
 		words[i] = 0
 	}
+	runtime.KeepAlive(words)
 	s.inner.SetInt64(0)
 }
 
@@ -178,6 +196,23 @@ func (s *Scalar) Zero() {
 // Edwards curve. The identity element is (0, 1).
 type Point struct {
 	inner twistededwards.PointAffine
+}
+
+// NewPointFromAffine creates a new [Point] from a gnark-crypto [twistededwards.PointAffine].
+// This is useful for constructing BJJ points from raw affine coordinates,
+// such as in hash-to-curve implementations.
+//
+// The point is validated to be on the curve and in the prime-order subgroup.
+// Returns an error if validation fails.
+func NewPointFromAffine(p twistededwards.PointAffine) (*Point, error) {
+	pt := &Point{inner: p}
+	if !pt.inner.IsOnCurve() {
+		return nil, errors.New("bjj: point is not on curve")
+	}
+	if !pt.IsInSubgroup() {
+		return nil, errors.New("bjj: point is not in the prime-order subgroup")
+	}
+	return pt, nil
 }
 
 // Add sets p to a + b and returns p.
@@ -292,6 +327,21 @@ func (p *Point) IsInSubgroup() bool {
 	return check.IsZero()
 }
 
+// Zero sets the point to the identity element (0, 1) and securely erases the
+// previous coordinate values from the underlying fr.Element memory.
+func (p *Point) Zero() {
+	// Overwrite the internal limbs of both coordinates before resetting.
+	for i := range p.inner.X {
+		p.inner.X[i] = 0
+	}
+	for i := range p.inner.Y {
+		p.inner.Y[i] = 0
+	}
+	p.inner.X.SetZero()
+	p.inner.Y.SetOne()
+	runtime.KeepAlive(&p.inner)
+}
+
 // BJJ implements [group.Group] for the Baby Jubjub curve.
 //
 // BJJ is a zero-sized type that provides access to Baby Jubjub curve
@@ -347,6 +397,8 @@ func (g *BJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 func (g *BJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	hashWith := func(counter byte) []byte {
 		h := sha256.New()
+		// Domain separator: prevent cross-curve hash collisions.
+		h.Write([]byte("BJJ"))
 		for _, d := range data {
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
@@ -361,14 +413,30 @@ func (g *BJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	copy(expanded[:32], hashWith(0x00))
 	copy(expanded[32:], hashWith(0x01))
 
+	n := new(big.Int).SetBytes(expanded)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+		n.SetInt64(0)
+	}()
+	n.Mod(n, curveOrder)
+
 	s := newScalar()
-	s.inner.SetBytes(expanded)
-	s.reduce()
+	s.inner.Set(n)
 	return s, nil
 }
 
+// XBytes returns the x-coordinate of the point as a 32-byte big-endian slice.
+func (p *Point) XBytes() []byte {
+	xBytes := p.inner.X.Bytes()
+	return xBytes[:]
+}
+
 // Order returns the order of the Baby Jubjub curve's prime-order subgroup
-// as a big-endian byte slice.
+// as a big-endian byte slice. Returns a fresh copy of the group order.
 func (g *BJJ) Order() []byte {
 	return curveOrder.Bytes()
 }

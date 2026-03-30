@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"runtime"
 	"sync"
@@ -31,6 +32,9 @@ type SigningSession struct {
 //
 // The participant must have completed DKG before creating signing sessions.
 func (p *Participant) NewSigningSession(rng io.Reader, message []byte) (*SigningSession, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	if p.keyShare == nil {
 		return nil, errors.New("DKG not complete: no key share available")
 	}
@@ -55,12 +59,18 @@ func (p *Participant) NewSigningSession(rng io.Reader, message []byte) (*Signing
 
 // Commitment returns the public commitment that must be broadcast to other signers.
 func (s *SigningSession) Commitment() *frost.SigningCommitment {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.commitment
 }
 
-// Message returns the message being signed.
+// Message returns a copy of the message being signed.
 func (s *SigningSession) Message() []byte {
-	return s.message
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	msgCopy := make([]byte, len(s.message))
+	copy(msgCopy, s.message)
+	return msgCopy
 }
 
 // Sign produces a signature share for this session.
@@ -98,15 +108,18 @@ func (s *SigningSession) Sign(allCommitments []*frost.SigningCommitment) (*frost
 		return nil, errors.New("own commitment not found in commitment list")
 	}
 
-	return s.frost.SignRound2(s.keyShare, s.nonce, s.message, allCommitments)
+	share, err := s.frost.SignRound2(s.keyShare, s.nonce, s.message, allCommitments)
+	// Release reference to the key share so the session does not pin it.
+	s.keyShare = nil
+	return share, err
 }
 
 // zeroNonces overwrites secret nonce values before releasing them.
 // This is a best-effort defense-in-depth measure. Limitations:
-//   - Sub() modifies the receiver in-place, which is more thorough than SetBytes()
-//     which may allocate new backing memory, but Go's GC may still have copied
-//     old values during compaction.
-//   - runtime.KeepAlive prevents GC collection before Sub completes,
+//   - Zero() overwrites the receiver's internal memory in-place, which is more
+//     thorough than SetBytes() which may allocate new backing memory, but Go's
+//     GC may still have copied old values during compaction.
+//   - runtime.KeepAlive prevents GC collection before Zero completes,
 //     but cannot prevent GC from copying the object during compaction.
 //
 // For stronger guarantees, use a scalar implementation backed by fixed-size
@@ -116,16 +129,12 @@ func (s *SigningSession) zeroNonces() {
 	if s.nonce == nil {
 		return
 	}
-	// Overwrite scalar internal state by setting to self-subtraction (zero).
-	// Sub() overwrites the receiver's internal words in-place, which is more
-	// thorough than SetBytes() which may allocate new backing memory.
-	// This is still best-effort: Go's GC may have copied the old values.
 	if s.nonce.D != nil {
-		s.nonce.D.Sub(s.nonce.D, s.nonce.D) // D = D - D = 0
+		s.nonce.D.Zero()
 		runtime.KeepAlive(s.nonce.D)
 	}
 	if s.nonce.E != nil {
-		s.nonce.E.Sub(s.nonce.E, s.nonce.E) // E = E - E = 0
+		s.nonce.E.Zero()
 		runtime.KeepAlive(s.nonce.E)
 	}
 	s.nonce = nil
@@ -193,6 +202,9 @@ func QuickSign(
 	if len(signerShares) == 0 {
 		return nil, errors.New("no key shares provided")
 	}
+	if len(signerShares) < f.Threshold() {
+		return nil, fmt.Errorf("need at least %d signers, got %d", f.Threshold(), len(signerShares))
+	}
 
 	// Round 1: Generate nonces and commitments
 	nonces := make([]*frost.SigningNonce, len(signerShares))
@@ -212,11 +224,11 @@ func QuickSign(
 		for _, n := range nonces {
 			if n != nil {
 				if n.D != nil {
-					n.D.Sub(n.D, n.D)
+					n.D.Zero()
 					runtime.KeepAlive(n.D)
 				}
 				if n.E != nil {
-					n.E.Sub(n.E, n.E)
+					n.E.Zero()
 					runtime.KeepAlive(n.E)
 				}
 			}

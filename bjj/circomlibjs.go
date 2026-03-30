@@ -2,14 +2,25 @@ package bjj
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
 	"math/big"
+	"runtime"
 
+	"github.com/consensys/gnark-crypto/ecc/bn254/twistededwards"
 	"github.com/f3rmion/fy/group"
 )
+
+// SECURITY NOTE: Scalar operations use math/big which is NOT constant-time.
+// This means Add, Sub, Mul, Negate, Invert, Equal, and IsZero have
+// data-dependent timing. For protocols requiring constant-time scalar
+// arithmetic (e.g., threshold signing over BJJ), consider using
+// gnark-crypto's fr.Element directly, which provides constant-time
+// Montgomery arithmetic. The point operations (ScalarMult) delegate to
+// gnark-crypto and ARE constant-time.
 
 // This file implements Baby JubJub with circomlibjs-compatible parameters.
 // Twisted Edwards curve: A*x^2 + y^2 = 1 + D*x^2*y^2
@@ -19,22 +30,65 @@ import (
 
 var (
 	// fieldP is the Baby JubJub base field modulus, which equals the BN254 scalar field (Fr).
-	fieldP, _ = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	fieldP *big.Int
 
 	// Curve parameters (circomlibjs)
 	curveA = big.NewInt(168700)
 	curveD = big.NewInt(168696)
 
 	// Subgroup order (same as gnark-crypto, this is the prime-order subgroup)
-	circSubOrder, _ = new(big.Int).SetString("2736030358979909402780800718157159386076813972158567259200215660948447373041", 10)
+	circSubOrder *big.Int
 
 	// Base8 generator (circomlibjs)
-	circBase8X, _ = new(big.Int).SetString("5299619240641551281634865583518297030282874472190772894086521144482721001553", 10)
-	circBase8Y, _ = new(big.Int).SetString("16950150798460657717958625567821834550301663161624707787222815936182638968203", 10)
+	circBase8X *big.Int
+	circBase8Y *big.Int
 
 	// Inverse of 8 modulo suborder (for DivBy8 operation)
-	circInv8 = new(big.Int).ModInverse(big.NewInt(8), circSubOrder)
+	circInv8 *big.Int
+
+	// sqrtNegA is sqrt(-A) mod fieldP, used for the coordinate isomorphism
+	// between circomlibjs (A=168700, D=168696) and gnark-crypto (a=-1)
+	// parameterizations of Baby JubJub. The isomorphism is:
+	//   x_gnark = u_circom * sqrtNegA,  y_gnark = v_circom
+	sqrtNegA    *big.Int
+	sqrtNegAInv *big.Int
 )
+
+// Compile-time interface checks.
+var (
+	_ group.Group  = (*CircomBJJ)(nil)
+	_ group.Scalar = (*CircomScalar)(nil)
+	_ group.Point  = (*CircomPoint)(nil)
+)
+
+func init() {
+	var ok bool
+	fieldP, ok = new(big.Int).SetString("21888242871839275222246405745257275088548364400416034343698204186575808495617", 10)
+	if !ok {
+		panic("circomlibjs: invalid field modulus constant")
+	}
+	circSubOrder, ok = new(big.Int).SetString("2736030358979909402780800718157159386076813972158567259200215660948447373041", 10)
+	if !ok {
+		panic("circomlibjs: invalid subgroup order constant")
+	}
+	circBase8X, ok = new(big.Int).SetString("5299619240641551281634865583518297030282874472190772894086521144482721001553", 10)
+	if !ok {
+		panic("circomlibjs: invalid Base8 X coordinate constant")
+	}
+	circBase8Y, ok = new(big.Int).SetString("16950150798460657717958625567821834550301663161624707787222815936182638968203", 10)
+	if !ok {
+		panic("circomlibjs: invalid Base8 Y coordinate constant")
+	}
+	circInv8 = new(big.Int).ModInverse(big.NewInt(8), circSubOrder)
+
+	// Compute sqrt(-A) mod fieldP for the coordinate isomorphism.
+	negA := new(big.Int).Sub(fieldP, curveA)
+	sqrtNegA = new(big.Int).ModSqrt(negA, fieldP)
+	if sqrtNegA == nil {
+		panic("circomlibjs: sqrt(-A) does not exist mod fieldP")
+	}
+	sqrtNegAInv = new(big.Int).ModInverse(sqrtNegA, fieldP)
+}
 
 // CircomScalar represents a scalar in the circomlibjs-compatible Baby JubJub field.
 type CircomScalar struct {
@@ -121,10 +175,11 @@ func (s *CircomScalar) Set(a group.Scalar) group.Scalar {
 	return s
 }
 
+// Bytes returns the scalar as a 32-byte big-endian representation.
+// Reduces into a temporary to avoid mutating the receiver.
 func (s *CircomScalar) Bytes() []byte {
-	// Ensure scalar is reduced before serialization
-	s.reduce()
-	bytes := s.inner.Bytes()
+	reduced := new(big.Int).Mod(s.inner, circSubOrder)
+	bytes := reduced.Bytes()
 	if len(bytes) >= 32 {
 		return bytes[:32]
 	}
@@ -134,6 +189,9 @@ func (s *CircomScalar) Bytes() []byte {
 }
 
 func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
+	if len(data) == 0 {
+		return nil, errors.New("empty scalar data")
+	}
 	if len(data) > 64 {
 		return nil, errors.New("scalar input exceeds 64 bytes")
 	}
@@ -142,17 +200,17 @@ func (s *CircomScalar) SetBytes(data []byte) (group.Scalar, error) {
 	return s, nil
 }
 
+// Equal reports whether s and b represent the same scalar value.
+// Uses constant-time comparison on the byte representations.
 func (s *CircomScalar) Equal(b group.Scalar) bool {
-	bs := assertCircomScalar(b)
-	// Reduce both operands into temporaries to avoid mutating either.
-	sReduced := new(big.Int).Mod(s.inner, circSubOrder)
-	bReduced := new(big.Int).Mod(bs.inner, circSubOrder)
-	return sReduced.Cmp(bReduced) == 0
+	return subtle.ConstantTimeCompare(s.Bytes(), b.Bytes()) == 1
 }
 
+// IsZero reports whether s is the zero scalar.
+// Uses constant-time comparison against a zero byte slice.
 func (s *CircomScalar) IsZero() bool {
-	s.reduce()
-	return s.inner.Sign() == 0
+	zero := make([]byte, 32)
+	return subtle.ConstantTimeCompare(s.Bytes(), zero) == 1
 }
 
 // Zero sets the scalar to zero and securely erases the previous value from
@@ -162,6 +220,7 @@ func (s *CircomScalar) Zero() {
 	for i := range words {
 		words[i] = 0
 	}
+	runtime.KeepAlive(words)
 	s.inner.SetInt64(0)
 }
 
@@ -212,6 +271,10 @@ func fieldInv(a *big.Int) *big.Int {
 // For a*x^2 + y^2 = 1 + d*x^2*y^2:
 // x3 = (x1*y2 + y1*x2) / (1 + d*x1*x2*y1*y2)
 // y3 = (y1*y2 - a*x1*x2) / (1 - d*x1*x2*y1*y2)
+//
+// WARNING: Add uses big.Int arithmetic which is NOT constant-time.
+// For operations on secret-derived points, use ScalarMult which delegates
+// to gnark-crypto's constant-time implementation.
 func (p *CircomPoint) Add(a, b group.Point) group.Point {
 	ap := assertCircomPoint(a)
 	bp := assertCircomPoint(b)
@@ -265,47 +328,37 @@ func (p *CircomPoint) Negate(a group.Point) group.Point {
 	return p
 }
 
-// ScalarMult computes s * q using a Montgomery ladder with fixed iteration count.
-// The loop always executes circSubOrder.BitLen() iterations (251 for BJJ) regardless
-// of the scalar value, preventing timing leaks from variable iteration count.
+// ScalarMult computes s * q using gnark-crypto's constant-time implementation.
 //
-// WARNING: This is NOT safe for secret scalars. The if/else branch on scalar bits
-// leaks through branch prediction side channels, and math/big operations have
-// data-dependent timing. For secret scalar multiplication, use bjj.Point.ScalarMult
-// (which delegates to gnark-crypto's constant-time implementation) instead.
-// This function is used only for public scalar operations (DivBy8, IsInSubgroup).
+// The circomlibjs coordinates (A=168700, D=168696) are converted to gnark-crypto's
+// (a=-1) parameterization via the isomorphism x_gnark = u_circom * sqrt(-A),
+// y_gnark = v_circom. After constant-time scalar multiplication, the result
+// is converted back.
 func (p *CircomPoint) ScalarMult(s group.Scalar, q group.Point) group.Point {
 	scalar := assertCircomScalar(s)
 	qp := assertCircomPoint(q)
 
-	// Montgomery ladder: constant-time scalar multiplication
-	// R0 = identity, R1 = q
-	r0 := newCircomPoint()
-	r0.x = big.NewInt(0)
-	r0.y = big.NewInt(1)
+	// Convert circomlibjs → gnark-crypto coordinates via isomorphism.
+	// x_gnark = u_circom * sqrt(-A), y_gnark = v_circom
+	xGnark := fieldMul(qp.x, sqrtNegA)
 
-	r1 := newCircomPoint()
-	r1.x = new(big.Int).Set(qp.x)
-	r1.y = new(big.Int).Set(qp.y)
+	var gnarkPt twistededwards.PointAffine
+	gnarkPt.X.SetBigInt(xGnark)
+	gnarkPt.Y.SetBigInt(qp.y)
 
+	// Constant-time scalar multiplication via gnark-crypto.
 	n := new(big.Int).Mod(scalar.inner, circSubOrder)
-	// Use fixed bit-width to prevent timing leaks from variable iteration count.
-	// circSubOrder.BitLen() is constant (251 bits for BJJ subgroup order).
-	fixedBits := circSubOrder.BitLen()
+	gnarkPt.ScalarMultiplication(&gnarkPt, n)
 
-	// Process bits from most significant to least significant
-	for i := fixedBits - 1; i >= 0; i-- {
-		if n.Bit(i) == 0 {
-			r1.Add(r0, r1)
-			r0.Add(r0, r0)
-		} else {
-			r0.Add(r0, r1)
-			r1.Add(r1, r1)
-		}
-	}
+	// Convert gnark-crypto → circomlibjs coordinates.
+	// u_circom = x_gnark / sqrt(-A), v_circom = y_gnark
+	var resultX, resultY big.Int
+	gnarkPt.X.BigInt(&resultX)
+	gnarkPt.Y.BigInt(&resultY)
 
-	p.x = r0.x
-	p.y = r0.y
+	p.x = fieldMul(&resultX, sqrtNegAInv)
+	p.y = new(big.Int).Set(&resultY)
+
 	return p
 }
 
@@ -383,7 +436,28 @@ func (p *CircomPoint) Equal(b group.Point) bool {
 }
 
 func (p *CircomPoint) IsIdentity() bool {
-	return p.x.Sign() == 0 && p.y.Cmp(big.NewInt(1)) == 0
+	// Reduce coordinates mod fieldP before comparison so that equivalent
+	// representations (e.g., x and x + fieldP) are correctly identified.
+	px := new(big.Int).Mod(p.x, fieldP)
+	py := new(big.Int).Mod(p.y, fieldP)
+	return px.Sign() == 0 && py.Cmp(big.NewInt(1)) == 0
+}
+
+// Zero sets the point to the identity element (0, 1) and securely erases the
+// previous coordinate values from the underlying big.Int memory.
+func (p *CircomPoint) Zero() {
+	xWords := p.x.Bits()
+	for i := range xWords {
+		xWords[i] = 0
+	}
+	runtime.KeepAlive(xWords)
+	yWords := p.y.Bits()
+	for i := range yWords {
+		yWords[i] = 0
+	}
+	runtime.KeepAlive(yWords)
+	p.x.SetInt64(0)
+	p.y.SetInt64(1)
 }
 
 // IsInSubgroup reports whether p is in the prime-order subgroup.
@@ -452,6 +526,8 @@ func (g *CircomBJJ) RandomScalar(r io.Reader) (group.Scalar, error) {
 func (g *CircomBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	hashWith := func(counter byte) []byte {
 		h := sha256.New()
+		// Domain separator: prevent cross-curve hash collisions.
+		h.Write([]byte("CircomBJJ"))
 		for _, d := range data {
 			var lenBuf [4]byte
 			binary.BigEndian.PutUint32(lenBuf[:], uint32(len(d)))
@@ -466,12 +542,24 @@ func (g *CircomBJJ) HashToScalar(data ...[]byte) (group.Scalar, error) {
 	copy(expanded[:32], hashWith(0x00))
 	copy(expanded[32:], hashWith(0x01))
 
+	n := new(big.Int).SetBytes(expanded)
+	defer func() {
+		words := n.Bits()
+		for i := range words {
+			words[i] = 0
+		}
+		runtime.KeepAlive(words)
+		n.SetInt64(0)
+	}()
+	n.Mod(n, circSubOrder)
+
 	s := newCircomScalar()
-	s.inner.SetBytes(expanded)
-	s.reduce()
+	s.inner.Set(n)
 	return s, nil
 }
 
+// Order returns the order of the circomlibjs-compatible BJJ subgroup as a big-endian
+// byte slice. Returns a fresh copy of the group order.
 func (g *CircomBJJ) Order() []byte {
 	return circSubOrder.Bytes()
 }

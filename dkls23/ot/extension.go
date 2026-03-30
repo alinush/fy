@@ -1,7 +1,7 @@
 package ot
 
 import (
-	"bytes"
+	"crypto/subtle"
 	"errors"
 	"slices"
 
@@ -9,15 +9,31 @@ import (
 	"github.com/f3rmion/fy/group"
 )
 
-// OT Extension constants from DKLs23
+// OT Extension constants from DKLs23.
+//
+// The relationships between these constants follow the KOS OT extension
+// security analysis (DKLs23, Section 3.3):
+//
+//	Kappa             = 256          (computational security: secp256k1 scalar bits)
+//	StatSecurity      = 80           (statistical security parameter)
+//	OTSecurity        = 128 + 80     = 208  (KOS consistency check field size)
+//	BatchSize         = 256 + 2*80   = 416  (OTs per extension: Kappa + 2*StatSecurity)
+//	ExtendedBatchSize = 416 + 208    = 624  (BatchSize + OTSecurity for PRG expansion)
+//
+// BatchSize includes 2*StatSecurity extra OTs beyond Kappa to absorb the
+// statistical error from the KOS consistency check. ExtendedBatchSize adds
+// OTSecurity bits for the GF(2^208) verification field.
 const (
-	// Kappa is the computational security parameter (256 bits)
+	// Kappa is the computational security parameter (256 bits).
 	Kappa = dkls23.RawSecurity
-	// OTSecurity is the statistical security for KOS (128 + 80 = 208 bits)
+	// OTSecurity is the statistical security for the KOS consistency check
+	// in GF(2^OTSecurity). Equals 128 + StatSecurity = 208 bits.
 	OTSecurity = 128 + dkls23.StatSecurity
-	// BatchSize is the number of OTs per extension (256 + 2*80 = 416)
+	// BatchSize is the number of usable OTs per extension invocation.
+	// Equals Kappa + 2*StatSecurity = 416.
 	BatchSize = dkls23.RawSecurity + 2*dkls23.StatSecurity
-	// ExtendedBatchSize is BatchSize + OTSecurity (416 + 208 = 624)
+	// ExtendedBatchSize is the total PRG expansion width.
+	// Equals BatchSize + OTSecurity = 624.
 	ExtendedBatchSize = BatchSize + OTSecurity
 )
 
@@ -33,10 +49,36 @@ type ExtSender struct {
 	Seeds       []dkls23.HashOutput // Seeds from base OT
 }
 
+// Zero securely erases seeds and correlation bits from the extension sender.
+func (s *ExtSender) Zero() {
+	for i := range s.Seeds {
+		for j := range s.Seeds[i] {
+			s.Seeds[i][j] = 0
+		}
+	}
+	for i := range s.Correlation {
+		s.Correlation[i] = false
+	}
+}
+
 // ExtReceiver holds the OT extension receiver's state
 type ExtReceiver struct {
 	Seeds0 []dkls23.HashOutput // Seeds for bit=0
 	Seeds1 []dkls23.HashOutput // Seeds for bit=1
+}
+
+// Zero securely erases seeds from the extension receiver.
+func (r *ExtReceiver) Zero() {
+	for i := range r.Seeds0 {
+		for j := range r.Seeds0[i] {
+			r.Seeds0[i][j] = 0
+		}
+	}
+	for i := range r.Seeds1 {
+		for j := range r.Seeds1[i] {
+			r.Seeds1[i][j] = 0
+		}
+	}
 }
 
 // DataToSender is the data transmitted from receiver to sender
@@ -72,7 +114,8 @@ func InitExtSenderPhase1(sessionID []byte) (*Receiver, []bool, []group.Scalar, [
 	return otReceiver, correlation, vecR, encProofs, nil
 }
 
-// InitExtSenderPhase2 finishes the extension sender initialization
+// InitExtSenderPhase2 finishes the extension sender initialization.
+// The otReceiver's seed is zeroed after use.
 func InitExtSenderPhase2(
 	otReceiver *Receiver,
 	sessionID []byte,
@@ -80,13 +123,21 @@ func InitExtSenderPhase2(
 	vecR []group.Scalar,
 	dlogProof *dkls23.DLogProof,
 ) (*ExtSender, error) {
+	// Zero the OT receiver's seed after computing outputs.
+	defer otReceiver.Zero()
+
 	seeds, err := otReceiver.Phase2Batch(sessionID, vecR, dlogProof)
 	if err != nil {
 		return nil, err
 	}
 
+	// Copy correlation so the caller can safely zero their original slice
+	// without corrupting the ExtSender's state (used across signing sessions).
+	corrCopy := make([]bool, len(correlation))
+	copy(corrCopy, correlation)
+
 	return &ExtSender{
-		Correlation: correlation,
+		Correlation: corrCopy,
 		Seeds:       seeds,
 	}, nil
 }
@@ -103,13 +154,17 @@ func InitExtReceiverPhase1(sessionID []byte) (*Sender, *dkls23.DLogProof, error)
 	return otSender, dlogProof, nil
 }
 
-// InitExtReceiverPhase2 finishes the extension receiver initialization
+// InitExtReceiverPhase2 finishes the extension receiver initialization.
+// The otSender's secret scalar is zeroed after use.
 func InitExtReceiverPhase2(
 	otSender *Sender,
 	sessionID []byte,
 	seed *Seed,
 	encProofs []*dkls23.EncProof,
 ) (*ExtReceiver, error) {
+	// Zero the OT sender's secret after extracting seeds.
+	defer otSender.Zero()
+
 	seeds0, seeds1, err := otSender.Phase2Batch(sessionID, seed, encProofs)
 	if err != nil {
 		return nil, err
@@ -121,8 +176,15 @@ func InitExtReceiverPhase2(
 	}, nil
 }
 
-// RunPhase1 runs the first phase of the receiver's protocol
+// RunPhase1 runs the first phase of the receiver's protocol.
+// The caller is responsible for calling Zero() when the ExtReceiver is no longer needed
+// (e.g., when the signing party is disposed). Seeds are reused across signing sessions.
 func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutput, *DataToSender, error) {
+	// Validate seed dimensions match security parameter.
+	if len(r.Seeds0) != Kappa || len(r.Seeds1) != Kappa {
+		return nil, nil, errors.New("ExtReceiver seed dimensions do not match Kappa")
+	}
+
 	// Extend choice bits with random noise
 	randomBits := make([]bool, OTSecurity)
 	randBytes, err := dkls23.RandBytes(OTSecurity / 8)
@@ -152,6 +214,15 @@ func (r *ExtReceiver) RunPhase1(sessionID []byte, choiceBits []bool) ([]PRGOutpu
 	for i := 0; i < Kappa; i++ {
 		for j := 0; j < ExtendedBatchSize/8; j++ {
 			u[i][j] = extSeeds0[i][j] ^ extSeeds1[i][j] ^ compressedBits[j]
+		}
+	}
+
+	// Zero extSeeds1 after use -- it is derived from Seeds1 and carries
+	// secret PRG material that is no longer needed (extSeeds0 is returned
+	// to the caller for use in RunPhase2).
+	for i := range extSeeds1 {
+		for j := range extSeeds1[i] {
+			extSeeds1[i][j] = 0
 		}
 	}
 
@@ -240,7 +311,9 @@ func (r *ExtReceiver) RunPhase2(
 	return vectorOfTB, nil
 }
 
-// Run runs the sender's protocol
+// Run runs the sender's protocol.
+// The caller is responsible for calling Zero() when the ExtSender is no longer needed
+// (e.g., when the signing party is disposed). Seeds are reused across signing sessions.
 func (s *ExtSender) Run(
 	sessionID []byte,
 	otWidth uint8,
@@ -249,6 +322,14 @@ func (s *ExtSender) Run(
 ) ([][]group.Scalar, [][]group.Scalar, error) {
 	if len(inputCorrelations) != int(otWidth) {
 		return nil, nil, errors.New("input correlations has wrong size")
+	}
+
+	// Validate sender-side dimensions.
+	if len(data.U) != Kappa {
+		return nil, nil, errors.New("DataToSender.U length does not match Kappa")
+	}
+	if len(data.VerifyT) != Kappa {
+		return nil, nil, errors.New("DataToSender.VerifyT length does not match Kappa")
 	}
 
 	// Extend seeds with PRG
@@ -266,6 +347,14 @@ func (s *ExtSender) Run(
 				mask = data.U[i][j]
 			}
 			q[i][j] = mask ^ extendedSeeds[i][j]
+		}
+	}
+
+	// Zero extendedSeeds after use -- they are derived from Seeds and
+	// carry secret PRG material that is no longer needed.
+	for i := range extendedSeeds {
+		for j := range extendedSeeds[i] {
+			extendedSeeds[i][j] = 0
 		}
 	}
 
@@ -302,9 +391,11 @@ func (s *ExtSender) Run(
 		}
 	}
 
-	// Verify consistency
+	// Verify consistency using constant-time comparison to prevent
+	// timing side-channels that could leak information about the
+	// correlation bits or PRG seeds.
 	for i := 0; i < Kappa; i++ {
-		if !bytes.Equal(verifyQ[i][:], verifySender[i][:]) {
+		if subtle.ConstantTimeCompare(verifyQ[i][:], verifySender[i][:]) != 1 {
 			return nil, nil, errors.New("receiver cheated: consistency check failed")
 		}
 	}
@@ -366,14 +457,23 @@ func bitsToBytes(bits []bool) []byte {
 	return result
 }
 
+// prgExpand expands a 32-byte seed into an ExtendedBatchSize/8 = 78 byte
+// PRGOutput using iterated SHA-256 with a domain-separated counter.
+//
+// Counter overflow analysis: each SHA-256 invocation produces 32 bytes.
+// To fill 78 bytes we need ceil(78/32) = 3 iterations, so the counter
+// reaches at most 3 -- far below the 0xFFFF panic threshold. The check
+// is retained as defense-in-depth against future constant changes.
 func prgExpand(seed dkls23.HashOutput, index uint16, sessionID []byte) PRGOutput {
 	var result PRGOutput
 	var count uint16
 	pos := 0
 
 	for pos < ExtendedBatchSize/8 {
-		salt := slices.Concat(uint16ToBytes(index), uint16ToBytes(count))
-		salt = slices.Concat(salt, sessionID)
+		if count == 0xFFFF {
+			panic("prgExpand: counter overflow")
+		}
+		salt := slices.Concat([]byte("PRG"), uint16ToBytes(index), uint16ToBytes(count), sessionID)
 		chunk := dkls23.Hash(seed[:], salt)
 		remaining := ExtendedBatchSize/8 - pos
 		if remaining > len(chunk) {
@@ -419,7 +519,7 @@ func fieldMul(left, right []byte) []byte {
 	const T = 4
 
 	if len(left) < OTSecurity/8 || len(right) < OTSecurity/8 {
-		return make([]byte, OTSecurity/8)
+		panic("fieldMul: input slices too short")
 	}
 
 	a := make([]uint64, T)

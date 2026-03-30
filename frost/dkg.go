@@ -49,6 +49,13 @@ type Participant struct {
 // The id parameter must be a unique integer from 1 to n (total participants).
 // The random reader r is used to generate the participant's secret polynomial.
 func (f *FROST) NewParticipant(r io.Reader, id int) (*Participant, error) {
+	if id == 0 {
+		return nil, errors.New("participant ID must be non-zero")
+	}
+	if id < 1 || id > f.total {
+		return nil, fmt.Errorf("participant ID must be between 1 and %d, got %d", f.total, id)
+	}
+
 	// Generate random polynomial of degree t-1
 	coeffs := make([]group.Scalar, f.threshold)
 	for i := range f.threshold {
@@ -104,6 +111,12 @@ func (f *FROST) Round1PrivateSend(p *Participant, recipientID int) *Round1Privat
 // The verification uses Feldman's VSS scheme: it checks that
 // share * G == sum(Commitment[i] * recipientID^i).
 func (f *FROST) Round2ReceiveShare(p *Participant, data *Round1PrivateData, senderCommitments []group.Point) error {
+	// Verify that the share is intended for this participant (check before
+	// expensive VSS computation to fail fast on misrouted shares).
+	if !data.ToID.Equal(p.id) {
+		return errors.New("share intended for a different recipient")
+	}
+
 	// Verify: share * G == sum(commitments[i] * recipientID^i)
 	lhs := f.group.NewPoint().ScalarMult(data.Share, f.group.Generator())
 
@@ -120,8 +133,11 @@ func (f *FROST) Round2ReceiveShare(p *Participant, data *Round1PrivateData, send
 		return errors.New("invalid share from participant")
 	}
 
-	// Store the share
+	// Store the share, rejecting duplicates
 	key := string(data.FromID.Bytes())
+	if _, exists := p.receivedShares[key]; exists {
+		return fmt.Errorf("frost: duplicate DKG share from participant")
+	}
 	p.receivedShares[key] = data.Share
 	return nil
 }
@@ -133,6 +149,10 @@ func (f *FROST) Round2ReceiveShare(p *Participant, data *Round1PrivateData, send
 // The returned [KeyShare] contains the participant's secret key share and
 // the group's combined public key, which is the same for all participants.
 func (f *FROST) Finalize(p *Participant, allBroadcasts []*Round1Data) (*KeyShare, error) {
+	if len(allBroadcasts) != f.total {
+		return nil, fmt.Errorf("expected %d broadcasts, got %d", f.total, len(allBroadcasts))
+	}
+
 	// Verify we received shares from all other participants
 	expectedShares := len(allBroadcasts) - 1
 	if len(p.receivedShares) != expectedShares {
@@ -156,13 +176,12 @@ func (f *FROST) Finalize(p *Participant, allBroadcasts []*Round1Data) (*KeyShare
 	// Zero out secret DKG material now that the key share has been derived.
 	// Coefficients encode the participant's secret polynomial and are the most
 	// sensitive intermediate values — they must not persist beyond DKG completion.
-	zero := f.group.NewScalar()
 	for i := range p.coefficients {
-		p.coefficients[i].Set(zero)
+		p.coefficients[i].Zero()
 	}
 	p.coefficients = nil
 	for _, share := range p.receivedShares {
-		share.Set(zero)
+		share.Zero()
 	}
 	p.receivedShares = nil
 

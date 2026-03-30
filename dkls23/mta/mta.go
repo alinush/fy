@@ -1,12 +1,8 @@
-// Package mta implements the Multiplicative-to-Additive conversion
-// using Oblivious Transfer as described in DKLs23.
-//
-// This realizes Functionality 3.5 in DKLs23 (https://eprint.iacr.org/2023/765.pdf).
-// It is based on Protocol 1 of DKLs19 (https://eprint.iacr.org/2019/523.pdf).
 package mta
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"errors"
 	"slices"
 
@@ -50,6 +46,23 @@ type DataToKeepReceiver struct {
 	ExtendedSeeds []ot.PRGOutput
 	ChiTilde      []group.Scalar
 	ChiHat        []group.Scalar
+}
+
+// Zero securely erases secret material in DataToKeepReceiver.
+func (d *DataToKeepReceiver) Zero() {
+	if d.B != nil {
+		d.B.Zero()
+	}
+	// Clear choice bits
+	for i := range d.ChoiceBits {
+		d.ChoiceBits[i] = false
+	}
+	// Clear extended seeds
+	for i := range d.ExtendedSeeds {
+		for j := range d.ExtendedSeeds[i] {
+			d.ExtendedSeeds[i][j] = 0
+		}
+	}
 }
 
 // ErrMul is returned when the multiplication protocol fails
@@ -149,6 +162,13 @@ func (s *Sender) Run(
 	if len(input) != L {
 		return nil, nil, errors.New("input must have L elements")
 	}
+	// Validate OT data dimensions (defense-in-depth; ExtSender.Run also checks).
+	if len(data.U) != ot.Kappa {
+		return nil, nil, errors.New("DataToSender.U length does not match Kappa")
+	}
+	if len(data.VerifyT) != ot.Kappa {
+		return nil, nil, errors.New("DataToSender.VerifyT length does not match Kappa")
+	}
 
 	// Step 2: Sample pads a_tilde and check values a_hat
 	aTilde := make([]group.Scalar, L)
@@ -164,19 +184,29 @@ func (s *Sender) Run(
 			return nil, nil, err
 		}
 	}
+	// Zero secret pads after use to prevent memory residue.
+	defer func() {
+		for i := range aTilde {
+			aTilde[i].Zero()
+		}
+		for i := range aHat {
+			aHat[i].Zero()
+		}
+	}()
 
-	// Create correlations: L copies of a_tilde, then L copies of a_hat
+	// Create correlations: L copies of a_tilde, then L copies of a_hat.
+	// Each entry is an independent copy (defense-in-depth against aliased mutation).
 	correlations := make([][]group.Scalar, OTWidth)
 	for i := 0; i < L; i++ {
 		correlations[i] = make([]group.Scalar, ot.BatchSize)
 		for j := 0; j < ot.BatchSize; j++ {
-			correlations[i][j] = aTilde[i]
+			correlations[i][j] = dkls23.NewScalar().Set(aTilde[i])
 		}
 	}
 	for i := 0; i < L; i++ {
 		correlations[L+i] = make([]group.Scalar, ot.BatchSize)
 		for j := 0; j < ot.BatchSize; j++ {
-			correlations[L+i][j] = aHat[i]
+			correlations[L+i][j] = dkls23.NewScalar().Set(aHat[i])
 		}
 	}
 
@@ -300,6 +330,17 @@ func (r *Receiver) RunPhase2(
 	dataKept *DataToKeepReceiver,
 	dataReceived *DataToReceiver,
 ) ([]group.Scalar, error) {
+	// Validate received data dimensions.
+	if len(dataReceived.VectorOfTau) != OTWidth {
+		return nil, errors.New("VectorOfTau length does not match OTWidth")
+	}
+	if len(dataReceived.GammaSender) != L {
+		return nil, errors.New("GammaSender length does not match L")
+	}
+	if len(dataReceived.VerifyU) != L {
+		return nil, errors.New("VerifyU length does not match L")
+	}
+
 	// Step 3 (Conclusion): Finish OT extension
 	oteSID := slices.Concat([]byte("OT Extension protocol"), sessionID)
 	otOutputs, err := r.OTEReceiver.RunPhase2(
@@ -333,7 +374,7 @@ func (r *Receiver) RunPhase2(
 	}
 	expectedVerifyR := dkls23.Hash(rowsR.Bytes(), sessionID)
 
-	if expectedVerifyR != dataReceived.VerifyR {
+	if subtle.ConstantTimeCompare(expectedVerifyR[:], dataReceived.VerifyR[:]) != 1 {
 		return nil, errors.New("sender cheated: consistency check failed")
 	}
 

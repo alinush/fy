@@ -1,12 +1,3 @@
-// Package dkls23 implements the DKLs23 threshold ECDSA protocol.
-//
-// Ported to Go from https://github.com/0xCarbon/DKLs23
-// Licensed under MIT/Apache-2.0 (dual license).
-//
-// This package provides a Paillier-free threshold ECDSA implementation
-// using Oblivious Transfer (OT) for the MtA (Multiplicative-to-Additive)
-// conversion, resulting in faster key generation compared to GG20.
-// See https://eprint.iacr.org/2023/765.pdf for the paper.
 package dkls23
 
 import (
@@ -102,7 +93,12 @@ func PointFromBytes(data []byte) (group.Point, error) {
 }
 
 // Hash computes SHA-256 of the message with optional salt.
-// Following 0xCarbon: hash(salt || msg)
+// Following 0xCarbon: hash(salt || msg).
+//
+// NOTE: Salt and message are concatenated without length prefixes. This is safe
+// because all call sites in this codebase use fixed-format salts (e.g., "Receiver",
+// "DLogProof", uint16-encoded counters) that prevent ambiguous concatenation.
+// Adding length prefixes would break protocol compatibility.
 func Hash(msg, salt []byte) HashOutput {
 	h := sha256.New()
 	h.Write(salt)
