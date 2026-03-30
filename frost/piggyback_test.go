@@ -370,7 +370,7 @@ func TestPiggybackOfflineSigner(t *testing.T) {
 	states, bootstrapShares, bootstrapCommitments := piggybackBootstrap(t, f, signers)
 
 	pubKeys := buildPublicKeys(keyShares)
-	_, collector, err := f.PiggybackAggregate(
+	_, _, err := f.PiggybackAggregate(
 		[]byte("bootstrap message"), 0, bootstrapCommitments, bootstrapShares, pubKeys, signers[0].GroupKey,
 	)
 	if err != nil {
@@ -380,22 +380,6 @@ func TestPiggybackOfflineSigner(t *testing.T) {
 	// Now signer 3 goes offline. Remaining: {0,1,2} (still >= threshold=3).
 	remainingSigners := signers[:3]
 	remainingStates := states[:3]
-
-	// Need commitments only for the remaining signers.
-	// Collect commitments from the collector for remaining signers only.
-	allNextComm := collector.Commitments()
-
-	// Filter to remaining signers' commitments.
-	remainingIDs := make(map[string]bool)
-	for _, ks := range remainingSigners {
-		remainingIDs[string(ks.ID.Bytes())] = true
-	}
-	var remainingComm []*SigningCommitment
-	for _, c := range allNextComm {
-		if remainingIDs[string(c.ID.Bytes())] {
-			remainingComm = append(remainingComm, c)
-		}
-	}
 
 	// The remaining signers need a fresh re-bootstrap since the commitment set changed
 	// (signer 3's commitment is no longer part of the session).
@@ -865,8 +849,7 @@ func TestPiggybackBindingFactorRegression(t *testing.T) {
 
 	bindingFactorsAfter := f.computeBindingFactors(sessionMsg, encCommitListAfter, nextComm)
 	for _, c := range nextComm {
-		key := string(c.ID.Bytes())
-		if !bindingFactors[key].Equal(bindingFactorsAfter[key]) {
+		if !bindingFactors[string(c.ID.Bytes())].Equal(bindingFactorsAfter[string(c.ID.Bytes())]) {
 			t.Fatal("binding factors differ after PiggybackSign -- possible contamination from NextCommitment")
 		}
 	}
