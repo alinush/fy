@@ -269,6 +269,15 @@ func (p *Point) Bytes() []byte {
 	return b
 }
 
+// CompressedBytes returns the 32-byte compressed point encoding.
+// Uses gnark-crypto's Bytes() which stores X plus a parity bit for Y in the
+// two most significant bits. This is the form relevant to on-wire transcript
+// size; SetBytes accepts it symmetrically.
+func (p *Point) CompressedBytes() []byte {
+	b := p.inner.Bytes()
+	return b[:]
+}
+
 // SetBytes sets p from a byte encoding and returns p.
 // Accepts gnark-crypto's serialization formats (compressed or uncompressed).
 // Returns an error if the data does not represent a valid curve point.

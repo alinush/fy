@@ -54,16 +54,30 @@ func sizesFromEnv() [][2]int {
 	return out
 }
 
+// compressedPoint returns the minimal on-wire encoding of pt. Points that
+// implement CompressedBytes() (e.g., BN254 G1) use it; otherwise we fall
+// back to Bytes(), which is already compressed for groups like BJJ.
+func compressedPoint(pt group.Point) []byte {
+	if cp, ok := pt.(interface{ CompressedBytes() []byte }); ok {
+		return cp.CompressedBytes()
+	}
+	return pt.Bytes()
+}
+
 // serializeRound0Msg produces a canonical length-prefixed binary encoding
-// of a Round0Msg, used to report on-wire transcript size. The layout is:
+// of a Round0Msg that includes every field VerifyDealing checks, using
+// compressed point encoding so the reported size reflects on-wire cost.
+// The layout is:
 //
 //	SessionID [32]
 //	From      uint32 BE
 //	RandomMsg [32]
-//	numVSS    uint32 BE, numVSS × Point.Bytes()
+//	numVSS    uint32 BE, numVSS × compressed Point
 //	numCts    uint32 BE, numCts × {recipientID uint32 BE, R point, z scalar}
-//	IdentityProof: commitment point, challenge scalar, response scalar
+//	IdentityProof: commitment point, challenge scalar, response scalar (inner group)
 //	numProofs uint32 BE, numProofs × {recipientID uint32 BE, proofLen uint32 BE, proof bytes}
+//	numDerived uint32 BE
+//	  each derived curve: numVSS + numCts blocks as above, encoded in its own group
 func serializeRound0Msg(msg *Round0Msg) []byte {
 	out := make([]byte, 0, 4096)
 
@@ -78,7 +92,7 @@ func serializeRound0Msg(msg *Round0Msg) []byte {
 	binary.BigEndian.PutUint32(buf[:], uint32(len(msg.VSSCommitments)))
 	out = append(out, buf[:]...)
 	for _, v := range msg.VSSCommitments {
-		out = append(out, v.Bytes()...)
+		out = append(out, compressedPoint(v)...)
 	}
 
 	ctIDs := make([]int, 0, len(msg.Ciphertexts))
@@ -92,11 +106,11 @@ func serializeRound0Msg(msg *Round0Msg) []byte {
 		ct := msg.Ciphertexts[id]
 		binary.BigEndian.PutUint32(buf[:], uint32(id))
 		out = append(out, buf[:]...)
-		out = append(out, ct.RCommitment.Bytes()...)
+		out = append(out, compressedPoint(ct.RCommitment)...)
 		out = append(out, ct.EncryptedShare.Bytes()...)
 	}
 
-	out = append(out, msg.IdentityProof.Commitment.Bytes()...)
+	out = append(out, compressedPoint(msg.IdentityProof.Commitment)...)
 	out = append(out, msg.IdentityProof.Challenge.Bytes()...)
 	out = append(out, msg.IdentityProof.Response.Bytes()...)
 
@@ -116,7 +130,248 @@ func serializeRound0Msg(msg *Round0Msg) []byte {
 		out = append(out, p...)
 	}
 
+	binary.BigEndian.PutUint32(buf[:], uint32(len(msg.DerivedCurves)))
+	out = append(out, buf[:]...)
+	for _, dc := range msg.DerivedCurves {
+		binary.BigEndian.PutUint32(buf[:], uint32(len(dc.VSSCommitments)))
+		out = append(out, buf[:]...)
+		for _, v := range dc.VSSCommitments {
+			out = append(out, compressedPoint(v)...)
+		}
+
+		dIDs := make([]int, 0, len(dc.Ciphertexts))
+		for id := range dc.Ciphertexts {
+			dIDs = append(dIDs, id)
+		}
+		sort.Ints(dIDs)
+		binary.BigEndian.PutUint32(buf[:], uint32(len(dIDs)))
+		out = append(out, buf[:]...)
+		for _, id := range dIDs {
+			ct := dc.Ciphertexts[id]
+			binary.BigEndian.PutUint32(buf[:], uint32(id))
+			out = append(out, buf[:]...)
+			out = append(out, compressedPoint(ct.RCommitment)...)
+			out = append(out, ct.EncryptedShare.Bytes()...)
+		}
+	}
+
 	return out
+}
+
+// deserializeRound0Msg parses the encoding produced by serializeRound0Msg
+// using the suite's inner/outer groups for the primary fields and
+// derivedGroups for any DerivedCurves. It assumes fixed per-group point and
+// scalar widths derived from the Generator / a zero scalar.
+func deserializeRound0Msg(
+	data []byte,
+	suite CurveSuite,
+	derivedGroups []group.Group,
+) (*Round0Msg, error) {
+	outer := suite.OuterGroup()
+	inner := suite.InnerGroup()
+	outerPtSize := len(compressedPoint(outer.Generator()))
+	innerPtSize := len(compressedPoint(inner.Generator()))
+	outerScSize := len(outer.NewScalar().Bytes())
+	innerScSize := len(inner.NewScalar().Bytes())
+
+	d := &decoder{buf: data}
+	msg := &Round0Msg{}
+
+	sid, err := d.fixed(32)
+	if err != nil {
+		return nil, fmt.Errorf("sessionID: %w", err)
+	}
+	copy(msg.SessionID[:], sid)
+
+	fromU32, err := d.u32()
+	if err != nil {
+		return nil, fmt.Errorf("from: %w", err)
+	}
+	msg.From = NodeID(fromU32)
+
+	rnd, err := d.fixed(32)
+	if err != nil {
+		return nil, fmt.Errorf("randomMsg: %w", err)
+	}
+	copy(msg.RandomMsg[:], rnd)
+
+	numVSS, err := d.u32()
+	if err != nil {
+		return nil, fmt.Errorf("numVSS: %w", err)
+	}
+	msg.VSSCommitments = make([]group.Point, numVSS)
+	for i := range msg.VSSCommitments {
+		pt, err := d.point(outer, outerPtSize)
+		if err != nil {
+			return nil, fmt.Errorf("vss[%d]: %w", i, err)
+		}
+		msg.VSSCommitments[i] = pt
+	}
+
+	numCts, err := d.u32()
+	if err != nil {
+		return nil, fmt.Errorf("numCts: %w", err)
+	}
+	msg.Ciphertexts = make(map[int]*Ciphertext, numCts)
+	for i := uint32(0); i < numCts; i++ {
+		recipID, err := d.u32()
+		if err != nil {
+			return nil, fmt.Errorf("ct[%d].id: %w", i, err)
+		}
+		R, err := d.point(outer, outerPtSize)
+		if err != nil {
+			return nil, fmt.Errorf("ct[%d].R: %w", i, err)
+		}
+		z, err := d.scalar(outer, outerScSize)
+		if err != nil {
+			return nil, fmt.Errorf("ct[%d].z: %w", i, err)
+		}
+		msg.Ciphertexts[int(recipID)] = &Ciphertext{RCommitment: R, EncryptedShare: z}
+	}
+
+	commit, err := d.point(inner, innerPtSize)
+	if err != nil {
+		return nil, fmt.Errorf("identityProof.commit: %w", err)
+	}
+	challenge, err := d.scalar(inner, innerScSize)
+	if err != nil {
+		return nil, fmt.Errorf("identityProof.challenge: %w", err)
+	}
+	response, err := d.scalar(inner, innerScSize)
+	if err != nil {
+		return nil, fmt.Errorf("identityProof.response: %w", err)
+	}
+	msg.IdentityProof = &IdentityProof{
+		Commitment: commit,
+		Challenge:  challenge,
+		Response:   response,
+	}
+
+	numProofs, err := d.u32()
+	if err != nil {
+		return nil, fmt.Errorf("numProofs: %w", err)
+	}
+	msg.EVRFProofs = make(map[int][]byte, numProofs)
+	for i := uint32(0); i < numProofs; i++ {
+		recipID, err := d.u32()
+		if err != nil {
+			return nil, fmt.Errorf("proof[%d].id: %w", i, err)
+		}
+		proofLen, err := d.u32()
+		if err != nil {
+			return nil, fmt.Errorf("proof[%d].len: %w", i, err)
+		}
+		p, err := d.fixed(int(proofLen))
+		if err != nil {
+			return nil, fmt.Errorf("proof[%d].body: %w", i, err)
+		}
+		msg.EVRFProofs[int(recipID)] = append([]byte(nil), p...)
+	}
+
+	numDerived, err := d.u32()
+	if err != nil {
+		return nil, fmt.Errorf("numDerived: %w", err)
+	}
+	if int(numDerived) != len(derivedGroups) {
+		return nil, fmt.Errorf("numDerived=%d but %d derivedGroups provided", numDerived, len(derivedGroups))
+	}
+	if numDerived > 0 {
+		msg.DerivedCurves = make([]*DerivedCurveData, numDerived)
+		for idx := uint32(0); idx < numDerived; idx++ {
+			dg := derivedGroups[idx]
+			dPtSize := len(compressedPoint(dg.Generator()))
+			dScSize := len(dg.NewScalar().Bytes())
+
+			numDVSS, err := d.u32()
+			if err != nil {
+				return nil, fmt.Errorf("derived[%d].numVSS: %w", idx, err)
+			}
+			vss := make([]group.Point, numDVSS)
+			for i := range vss {
+				pt, err := d.point(dg, dPtSize)
+				if err != nil {
+					return nil, fmt.Errorf("derived[%d].vss[%d]: %w", idx, i, err)
+				}
+				vss[i] = pt
+			}
+
+			numDCts, err := d.u32()
+			if err != nil {
+				return nil, fmt.Errorf("derived[%d].numCts: %w", idx, err)
+			}
+			cts := make(map[int]*Ciphertext, numDCts)
+			for i := uint32(0); i < numDCts; i++ {
+				recipID, err := d.u32()
+				if err != nil {
+					return nil, fmt.Errorf("derived[%d].ct[%d].id: %w", idx, i, err)
+				}
+				R, err := d.point(dg, dPtSize)
+				if err != nil {
+					return nil, fmt.Errorf("derived[%d].ct[%d].R: %w", idx, i, err)
+				}
+				z, err := d.scalar(dg, dScSize)
+				if err != nil {
+					return nil, fmt.Errorf("derived[%d].ct[%d].z: %w", idx, i, err)
+				}
+				cts[int(recipID)] = &Ciphertext{RCommitment: R, EncryptedShare: z}
+			}
+
+			msg.DerivedCurves[idx] = &DerivedCurveData{VSSCommitments: vss, Ciphertexts: cts}
+		}
+	}
+
+	if d.remaining() != 0 {
+		return nil, fmt.Errorf("trailing bytes: %d", d.remaining())
+	}
+	return msg, nil
+}
+
+type decoder struct {
+	buf []byte
+	off int
+}
+
+func (d *decoder) remaining() int { return len(d.buf) - d.off }
+
+func (d *decoder) fixed(n int) ([]byte, error) {
+	if d.remaining() < n {
+		return nil, fmt.Errorf("short read: need %d have %d", n, d.remaining())
+	}
+	out := d.buf[d.off : d.off+n]
+	d.off += n
+	return out, nil
+}
+
+func (d *decoder) u32() (uint32, error) {
+	b, err := d.fixed(4)
+	if err != nil {
+		return 0, err
+	}
+	return binary.BigEndian.Uint32(b), nil
+}
+
+func (d *decoder) point(g group.Group, size int) (group.Point, error) {
+	b, err := d.fixed(size)
+	if err != nil {
+		return nil, err
+	}
+	pt, err := g.NewPoint().SetBytes(b)
+	if err != nil {
+		return nil, err
+	}
+	return pt, nil
+}
+
+func (d *decoder) scalar(g group.Group, size int) (group.Scalar, error) {
+	b, err := d.fixed(size)
+	if err != nil {
+		return nil, err
+	}
+	sc, err := g.NewScalar().SetBytes(b)
+	if err != nil {
+		return nil, err
+	}
+	return sc, nil
 }
 
 // makeParticipants generates N participants with fresh BJJ key pairs.
@@ -157,6 +412,10 @@ func doWarmup(tb testing.TB) {
 
 // TestPrintTranscriptSize reports the serialized size of one Round0Msg for
 // each (t, n) configured via GOLDEN_SIZES (default: the blog's full table).
+// For each size it also roundtrips the transcript (serialize → deserialize →
+// VerifyDealing) to confirm the encoding is complete: every field
+// VerifyDealing inspects is carried on the wire with compressed point
+// encoding.
 //
 // Example:
 //
@@ -189,7 +448,72 @@ func TestPrintTranscriptSize(t *testing.T) {
 			buf := serializeRound0Msg(dealing.Message)
 			t.Logf("transcript t=%-3d n=%-3d bytes=%-9d (%.2f KiB)",
 				threshold, n, len(buf), float64(len(buf))/1024)
+
+			// Roundtrip: the reported size must cover every field VerifyDealing
+			// checks. If anything is missing, verification on the reconstructed
+			// message will fail.
+			got, err := deserializeRound0Msg(buf, suite, cfg.DerivedGroups)
+			if err != nil {
+				t.Fatalf("deserializeRound0Msg: %v", err)
+			}
+			verifier := peers[0]
+			recipientPKs := make(map[int]group.Point, n-1)
+			for _, p := range peers {
+				recipientPKs[p.ID] = p.PK
+			}
+			if err := VerifyDealing(suite, cfg, got, verifier, dealer.PK, recipientPKs); err != nil {
+				t.Fatalf("VerifyDealing on deserialized transcript: %v", err)
+			}
 		})
+	}
+}
+
+// TestTranscriptRoundtripDerived exercises the DerivedCurves branch of the
+// serializer/deserializer. A single small (t=2, n=3) dealing is created with
+// a BJJ derived curve, then roundtripped through serialize → deserialize and
+// re-verified.
+func TestTranscriptRoundtripDerived(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	doWarmup(t)
+	inner := &bjj.BJJ{}
+	suite := NewBN254BJJSuite()
+	bjjGroup := &bjj.BJJ{}
+
+	n, threshold := 3, 2
+	var sid SessionID
+	if _, err := rand.Read(sid[:]); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &DkgConfig{
+		N:             n,
+		T:             threshold,
+		SessionID:     sid,
+		DerivedGroups: []group.Group{bjjGroup},
+	}
+	participants := makeParticipants(t, inner, n)
+	dealer := participants[0]
+	peers := participants[1:]
+
+	dealing, err := CreateDealing(suite, cfg, dealer, peers, rand.Reader)
+	if err != nil {
+		t.Fatalf("CreateDealing: %v", err)
+	}
+
+	buf := serializeRound0Msg(dealing.Message)
+	t.Logf("transcript (1 derived curve) bytes=%d", len(buf))
+
+	got, err := deserializeRound0Msg(buf, suite, cfg.DerivedGroups)
+	if err != nil {
+		t.Fatalf("deserializeRound0Msg: %v", err)
+	}
+	recipientPKs := make(map[int]group.Point, n-1)
+	for _, p := range peers {
+		recipientPKs[p.ID] = p.PK
+	}
+	if err := VerifyDealing(suite, cfg, got, peers[0], dealer.PK, recipientPKs); err != nil {
+		t.Fatalf("VerifyDealing on deserialized transcript: %v", err)
 	}
 }
 
