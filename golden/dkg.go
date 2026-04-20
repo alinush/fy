@@ -8,10 +8,10 @@ import (
 )
 
 // MaxParticipants is the upper bound on the number of participants (N) in a
-// GOLDEN DKG session. This limits resource consumption (polynomial evaluation,
-// VSS commitments, ciphertext generation) and prevents abuse via excessively
-// large participant sets.
-const MaxParticipants = 256
+// GOLDEN DKG session or players in a PVSS dealing. This limits resource
+// consumption (polynomial evaluation, VSS commitments, ciphertext generation)
+// and prevents abuse via excessively large participant sets.
+const MaxParticipants = 1024
 
 // CreateDealing generates a DKG dealing message for the non-interactive GOLDEN DKG.
 //
