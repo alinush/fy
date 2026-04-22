@@ -14,6 +14,11 @@ const (
 	// lhlAlphaDomain is the domain separator for deriving the LHL combination
 	// coefficient alpha in the eVRF pad construction.
 	lhlAlphaDomain = "golden-lhl-alpha"
+
+	// pvssBatchDomain is the domain separator for the Fiat-Shamir challenge
+	// used to fold the N per-player VSS consistency checks in PVSSVerify into
+	// a single randomized linear combination.
+	pvssBatchDomain = "golden-pvss-batch-v1"
 )
 
 // SessionID uniquely identifies a DKG session.

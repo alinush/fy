@@ -279,7 +279,8 @@ func PVSSVerify(
 		return fmt.Errorf("golden: deriving alpha: %w", err)
 	}
 
-	// VSS ciphertext consistency check for each player.
+	// Structural / identity checks per player (cheap, keeps per-player granularity
+	// for malformed input).
 	for idx, ct := range trs.Ciphertexts {
 		if ct == nil {
 			return fmt.Errorf("%w: player %d", ErrNilCiphertext, idx+1)
@@ -287,15 +288,24 @@ func PVSSVerify(
 		if ct.RCommitment.IsIdentity() {
 			return fmt.Errorf("%w: player %d", ErrIdentityRCommitment, idx+1)
 		}
-		zG := outerGroup.NewPoint().ScalarMult(ct.EncryptedShare, outerGroup.Generator())
-		expected, err := ExpectedShareCommitment(outerGroup, trs.VSSCommitments, idx+1)
-		if err != nil {
-			return fmt.Errorf("golden: share commitment for player %d: %w", idx+1, err)
-		}
-		rhs := outerGroup.NewPoint().Add(ct.RCommitment, expected)
-		if !zG.Equal(rhs) {
-			return fmt.Errorf("%w: player %d", ErrCiphertextVerification, idx+1)
-		}
+	}
+
+	// Batched VSS consistency check.
+	//
+	// Per-player equation: z_i·G == R_i + sum_k i^k · A_k, where A_k are the
+	// Feldman commitments, R_i is the eVRF pad commitment, and z_i is the
+	// encrypted share. A naive loop costs N·T scalar multiplications. We fold
+	// all N equations into one by picking a single Fiat-Shamir challenge s
+	// bound to the transcript and setting r_i = s^{i-1}:
+	//
+	//   (sum_i r_i · z_i) · G  ==  sum_i r_i · R_i  +  sum_k c_k · A_k,
+	//   where  c_k = sum_{i=1..N} r_i · i^k.
+	//
+	// Soundness is Schwartz-Zippel: if any per-player equation fails, the
+	// aggregate fails except with probability < T/|F|. Cost drops to N+T
+	// scalar mults + O(N·T) cheap scalar-field ops.
+	if err := verifyVSSBatched(outerGroup, config, trs); err != nil {
+		return err
 	}
 
 	// eVRF proof verification for each player.
@@ -312,6 +322,93 @@ func PVSSVerify(
 		); err != nil {
 			return fmt.Errorf("%w: player %d: %v", ErrEVRFProofFailed, idx+1, err)
 		}
+	}
+	return nil
+}
+
+// verifyVSSBatched performs the randomized-linear-combination VSS consistency
+// check used by PVSSVerify. See the block comment at the call site for the
+// equation and soundness argument.
+func verifyVSSBatched(g group.Group, config *PVSSConfig, trs *PVSSTranscript) error {
+	N := config.N
+	T := config.T
+
+	// Fiat-Shamir challenge, binding every transcript field that enters the
+	// aggregate equation: SessionID, VSS commitments, R_i's, and z_i's.
+	seedCap := 32 + 32*T + 64*N
+	seed := make([]byte, 0, seedCap)
+	seed = append(seed, config.SessionID[:]...)
+	for _, a := range trs.VSSCommitments {
+		seed = append(seed, compressedPoint(a)...)
+	}
+	for _, ct := range trs.Ciphertexts {
+		seed = append(seed, compressedPoint(ct.RCommitment)...)
+		seed = append(seed, ct.EncryptedShare.Bytes()...)
+	}
+	s, err := g.HashToScalar([]byte(pvssBatchDomain), seed)
+	if err != nil {
+		return fmt.Errorf("golden: deriving batch challenge: %w", err)
+	}
+
+	// r[i] = s^i for i = 0..N-1. Aggregate zAgg = sum r[i] · z_{i+1} along the way.
+	r := make([]group.Scalar, N)
+	zAgg := g.NewScalar()
+	tmpScalar := g.NewScalar()
+	rPower, err := scalarFromInt(g, 1)
+	if err != nil {
+		return fmt.Errorf("golden: unit scalar: %w", err)
+	}
+	for i := 0; i < N; i++ {
+		r[i] = g.NewScalar().Set(rPower)
+		tmpScalar.Mul(r[i], trs.Ciphertexts[i].EncryptedShare)
+		zAgg.Add(zAgg, tmpScalar)
+		rPower.Mul(rPower, s)
+	}
+
+	// Build c_k = sum_{i=1..N} r_{i-1} · i^k  for k = 0..T-1.
+	//
+	// Maintain u[i] = r_{i-1} · i^k across iterations: u starts at r_{i-1}
+	// (i.e., i^0 = 1), and after emitting c_k we update u[i] *= i.
+	u := make([]group.Scalar, N)
+	iScalars := make([]group.Scalar, N)
+	for i := 0; i < N; i++ {
+		u[i] = g.NewScalar().Set(r[i])
+		iScalars[i], err = scalarFromInt(g, i+1)
+		if err != nil {
+			return fmt.Errorf("golden: index scalar: %w", err)
+		}
+	}
+	cCoefs := make([]group.Scalar, T)
+	for k := 0; k < T; k++ {
+		ck := g.NewScalar()
+		for i := 0; i < N; i++ {
+			ck.Add(ck, u[i])
+		}
+		cCoefs[k] = ck
+		if k < T-1 {
+			for i := 0; i < N; i++ {
+				u[i].Mul(u[i], iScalars[i])
+			}
+		}
+	}
+
+	// LHS = zAgg · G.
+	lhs := g.NewPoint().ScalarMult(zAgg, g.Generator())
+
+	// RHS = sum_i r[i] · R_i  +  sum_k c_k · A_k.
+	rhs := g.NewPoint()
+	tmpPoint := g.NewPoint()
+	for i := 0; i < N; i++ {
+		tmpPoint.ScalarMult(r[i], trs.Ciphertexts[i].RCommitment)
+		rhs.Add(rhs, tmpPoint)
+	}
+	for k := 0; k < T; k++ {
+		tmpPoint.ScalarMult(cCoefs[k], trs.VSSCommitments[k])
+		rhs.Add(rhs, tmpPoint)
+	}
+
+	if !lhs.Equal(rhs) {
+		return ErrCiphertextVerification
 	}
 	return nil
 }
